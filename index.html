@@ -1315,12 +1315,12 @@ function renderImportStep1(body){
 }
 function iconUpload(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`; }
 
-function handleFile(file){
+async function handleFile(file){
   const st = UI.importState;
   st.fileName = file.name;
-  const reader = new FileReader();
-  reader.onload = (e)=>{
-    const text = e.target.result;
+  try{
+    const buf = await file.arrayBuffer();
+    const text = decodeSmart(buf);
     const result = Papa.parse(text.trim(), {skipEmptyLines:true});
     let rows = result.data;
     if(!rows.length){ toast('Could not read any rows from that file', 'error'); return; }
@@ -1331,13 +1331,25 @@ function handleFile(file){
       st.headers = rows[0].map((_,i)=>'Column '+(i+1));
       st.rows = rows;
     }
+    // Drop fully-blank trailing rows some banks add at the end of the export.
+    st.rows = st.rows.filter(r=> r.some(cell=> String(cell||'').trim() !== ''));
     st.mapping = guessMapping(st.headers);
     st.step = 2;
     renderImport(document.getElementById('content'));
     toast(`Loaded ${st.rows.length} rows from ${file.name}`);
-  };
-  reader.onerror = ()=> toast('Could not read that file', 'error');
-  reader.readAsText(file);
+  }catch(err){
+    console.error(err);
+    toast('Could not read that file', 'error');
+  }
+}
+function decodeSmart(buf){
+  // Most exports are UTF-8, but some UK banks (e.g. Santander) export in
+  // Windows-1252, where £ is a single byte that UTF-8 mangles into "�".
+  // Try UTF-8 first; if it looks corrupted, fall back to Windows-1252.
+  const utf8 = new TextDecoder('utf-8').decode(buf);
+  if(utf8.indexOf('\ufffd') === -1) return utf8;
+  try{ return new TextDecoder('windows-1252').decode(buf); }
+  catch(e){ return utf8; }
 }
 function guessMapping(headers){
   const find = (names)=>{
@@ -1450,8 +1462,17 @@ function parseImportRow(r, st){
 }
 function parseMoney(v){
   if(v===undefined||v===null||v==='') return 0;
-  const n = parseFloat(String(v).replace(/[£,\s]/g,''));
-  return isNaN(n) ? 0 : n;
+  let s = String(v).trim();
+  if(s==='') return 0;
+  let neg = false;
+  if(/^\(.*\)$/.test(s)){ neg = true; s = s.slice(1,-1); }
+  // Strip everything except digits, minus and decimal point — covers £, $,
+  // "GBP", stray "�" from encoding issues, thousands separators, etc.
+  s = s.replace(/[^0-9.\-]/g, '');
+  if(s.indexOf('-') > -1){ neg = true; s = s.replace(/-/g,''); }
+  if(s==='') return 0;
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : (neg ? -n : n);
 }
 function parseAnyDate(v, fmt){
   if(!v) return '';
