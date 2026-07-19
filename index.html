@@ -622,13 +622,14 @@ function currentBalance(){
 }
 function periodRange(period){
   const now = new Date();
-  const y = now.getFullYear(), m = now.getMonth();
   if(period==='month'){
-    const from = new Date(y,m,1).toISOString().slice(0,10);
-    const to = new Date(y,m+1,0).toISOString().slice(0,10);
-    return {from, to, label: now.toLocaleDateString('en-GB',{month:'long', year:'numeric'})};
+    const base = new Date(now.getFullYear(), now.getMonth() + UI.dashboardMonthOffset, 1);
+    const from = base.toISOString().slice(0,10);
+    const to = new Date(base.getFullYear(), base.getMonth()+1, 0).toISOString().slice(0,10);
+    return {from, to, label: base.toLocaleDateString('en-GB',{month:'long', year:'numeric'})};
   }
   if(period==='year'){
+    const y = now.getFullYear() + UI.dashboardYearOffset;
     return {from:`${y}-01-01`, to:`${y}-12-31`, label:String(y)};
   }
   return {from:'0000-01-01', to:'9999-12-31', label:'All time'};
@@ -670,6 +671,8 @@ function closeModal(){
 const UI = {
   tab: 'dashboard',
   dashboardPeriod: 'month',
+  dashboardMonthOffset: 0,
+  dashboardYearOffset: 0,
   trendGran: 'month',
   txSort: {col:'date', dir:'desc'},
   txFilters: {search:'', category:'all', type:'all', from:'', to:''},
@@ -723,6 +726,8 @@ function renderTopbarActions(){
 
 function iconPlus(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`; }
 function iconWand(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8 19 13M15 9l-9.9 9.9a1 1 0 0 0 0 1.4l.6.6a1 1 0 0 0 1.4 0L17 12"/></svg>`; }
+function iconChevronLeft(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>`; }
+function iconChevronRight(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>`; }
 
 function renderContent(){
   renderSidebarBits();
@@ -742,6 +747,9 @@ function renderDashboard(c){
   const income = sumIncome(list), expense = sumExpense(list), net = income-expense;
   const balance = currentBalance();
 
+  const offset = UI.dashboardPeriod==='month' ? UI.dashboardMonthOffset : (UI.dashboardPeriod==='year' ? UI.dashboardYearOffset : 0);
+  const canNav = UI.dashboardPeriod==='month' || UI.dashboardPeriod==='year';
+
   c.innerHTML = `
     <div class="panel-head" style="margin-bottom:14px;">
       <div class="seg" id="period-seg">
@@ -749,7 +757,12 @@ function renderDashboard(c){
         <button data-p="year" class="${UI.dashboardPeriod==='year'?'active':''}">This year</button>
         <button data-p="all" class="${UI.dashboardPeriod==='all'?'active':''}">All time</button>
       </div>
-      <div class="page-sub" style="margin:0;">${range.label}</div>
+      <div style="display:flex; align-items:center; gap:6px;">
+        ${canNav ? `<button class="btn btn-ghost btn-sm" id="period-prev" title="Previous ${UI.dashboardPeriod}" style="padding:6px 9px;">${iconChevronLeft()}</button>` : ''}
+        <div class="page-sub" style="margin:0; min-width:110px; text-align:center;">${range.label}</div>
+        ${canNav ? `<button class="btn btn-ghost btn-sm" id="period-next" title="Next ${UI.dashboardPeriod}" style="padding:6px 9px;" ${offset>=0?'disabled':''}>${iconChevronRight()}</button>` : ''}
+        ${canNav && offset!==0 ? `<button class="btn btn-ghost btn-sm" id="period-today">Today</button>` : ''}
+      </div>
     </div>
 
     <div class="kpi-row">
@@ -786,8 +799,28 @@ function renderDashboard(c){
 
   document.getElementById('period-seg').addEventListener('click', e=>{
     const b = e.target.closest('button'); if(!b) return;
-    UI.dashboardPeriod = b.dataset.p; renderDashboard(c);
+    UI.dashboardPeriod = b.dataset.p;
+    UI.dashboardMonthOffset = 0;
+    UI.dashboardYearOffset = 0;
+    renderDashboard(c);
   });
+  const prevBtn = document.getElementById('period-prev');
+  const nextBtn = document.getElementById('period-next');
+  const todayBtn = document.getElementById('period-today');
+  if(prevBtn) prevBtn.onclick = ()=>{
+    if(UI.dashboardPeriod==='month') UI.dashboardMonthOffset--;
+    else UI.dashboardYearOffset--;
+    renderDashboard(c);
+  };
+  if(nextBtn) nextBtn.onclick = ()=>{
+    if(UI.dashboardPeriod==='month') UI.dashboardMonthOffset = Math.min(0, UI.dashboardMonthOffset+1);
+    else UI.dashboardYearOffset = Math.min(0, UI.dashboardYearOffset+1);
+    renderDashboard(c);
+  };
+  if(todayBtn) todayBtn.onclick = ()=>{
+    UI.dashboardMonthOffset = 0; UI.dashboardYearOffset = 0;
+    renderDashboard(c);
+  };
   document.getElementById('trend-seg').addEventListener('click', e=>{
     const b = e.target.closest('button'); if(!b) return;
     UI.trendGran = b.dataset.g; drawTrendChart();
@@ -1233,8 +1266,21 @@ function openRuleModal(){
     const cat = document.getElementById('r-cat').value;
     if(!kw){ toast('Enter text to match', 'error'); return; }
     DB.rules.unshift({keyword:kw, category:cat});
-    scheduleSave(); closeModal(); renderCategories(document.getElementById('content')); toast('Rule added');
+    const applied = applyRuleToUncategorised(kw, cat);
+    scheduleSave(); closeModal(); renderCategories(document.getElementById('content')); renderSidebarBits();
+    toast(applied ? `Rule added — applied to ${applied} existing uncategorised transaction${applied===1?'':'s'}` : 'Rule added');
   };
+}
+function applyRuleToUncategorised(keyword, category){
+  const kw = keyword.toUpperCase();
+  let count = 0;
+  DB.transactions.forEach(t=>{
+    if(!t.category && t.description.toUpperCase().includes(kw)){
+      t.category = category;
+      count++;
+    }
+  });
+  return count;
 }
 
 /* =========================================================
