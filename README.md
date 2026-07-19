@@ -20,7 +20,7 @@ great on desktop or mobile browsers, but a Claude-hosted preview can't be
 "installed" to a home screen the way a real PWA can (browsers only allow
 installing apps served from a real website).
 
-## Installing it as a real app on your phone (optional)
+## Installing it as a real app on your phone
 
 To get the full PWA experience — an icon on your home screen, opening in
 its own window, working offline — host all four files above together on
@@ -37,12 +37,23 @@ Once it's live on a real `https://` URL:
 - **Android (Chrome):** open the URL → menu (⋮) → "Add to Home screen" /
   "Install app".
 
-Note: because each browser tab/site has its own separate storage, data
-you enter inside Claude and data you enter on a self-hosted copy won't
-be shared automatically — use **Export backup** (sidebar) to download a
-`.json` copy, and **Settings → Restore from backup…** on the other copy
-to load it in. Restoring replaces whatever's currently on that device,
-so export first if you want to keep both.
+**Important — if you installed this before 19 July 2026:** earlier
+versions of `index.html` only knew how to save through Claude's own
+storage. Outside Claude (i.e. once hosted and installed on your phone),
+that storage doesn't exist, so nothing was actually being saved between
+visits — every reopen quietly reset to the sample data. This is now
+fixed: outside Claude, the app saves to your browser's local storage
+instead, which is what persists properly on an installed PWA. **Re-download
+`index.html` and push it to your repo** to pick up the fix — you'll need
+to re-enter any data you'd added on the installed copy, since the old
+version was never actually saving it.
+
+Note: because Claude's storage and your phone's local storage are
+separate, data you enter inside Claude and data you enter on the
+installed copy won't sync automatically — use **Export backup**
+(sidebar) to download a `.json` copy, and **Settings → Restore from
+backup…** on the other copy to load it in. Restoring replaces whatever's
+currently on that device, so export first if you want to keep both.
 
 ## Importing a bank statement
 

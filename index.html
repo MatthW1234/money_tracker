@@ -517,14 +517,23 @@ function buildEmptyDB(){
 /* ---------- persistence ---------- */
 let DB = null;
 let saveTimer = null;
+// window.storage is a Claude-only API. When this app is self-hosted (GitHub
+// Pages, etc.) and installed as a PWA, that API doesn't exist — so we fall
+// back to the browser's own localStorage, which is exactly what makes an
+// installed PWA remember your data between visits on your phone.
+const IN_CLAUDE = !!(window.storage && window.storage.get && window.storage.set);
+const LOCAL_KEY = 'pocketledger_data_v1';
 function scheduleSave(){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(persist, 450);
 }
 async function persist(){
+  const json = JSON.stringify(DB);
   try{
-    if(window.storage && window.storage.set){
-      await window.storage.set(STORAGE_KEY, JSON.stringify(DB), false);
+    if(IN_CLAUDE){
+      await window.storage.set(STORAGE_KEY, json, false);
+    } else if(window.localStorage){
+      window.localStorage.setItem(LOCAL_KEY, json);
     }
   }catch(e){
     console.error('save failed', e);
@@ -533,11 +542,16 @@ async function persist(){
 }
 async function loadDB(){
   try{
-    if(window.storage && window.storage.get){
+    if(IN_CLAUDE){
       const res = await window.storage.get(STORAGE_KEY, false);
       if(res && res.value) return JSON.parse(res.value);
+      return null;
     }
-  }catch(e){ /* key not found or storage unavailable */ }
+    if(window.localStorage){
+      const raw = window.localStorage.getItem(LOCAL_KEY);
+      if(raw) return JSON.parse(raw);
+    }
+  }catch(e){ /* key not found, storage unavailable, or corrupt JSON */ }
   return null;
 }
 
