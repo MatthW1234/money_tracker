@@ -1622,8 +1622,11 @@ function openSettingsModal(){
         <input type="number" step="0.01" id="s-balance" value="${DB.startingBalance}">
       </div>
       <div style="border-top:1px solid var(--line); padding-top:16px; display:flex; flex-direction:column; gap:8px;">
+        <button class="btn" id="s-restore">Restore from backup…</button>
+        <input type="file" id="s-restore-file" accept=".json,application/json" class="hidden">
+        <button class="btn btn-danger" id="s-clear-tx">Remove all transactions</button>
         <button class="btn" id="s-load-sample">Load sample data</button>
-        <button class="btn btn-danger" id="s-clear">Clear all data</button>
+        <button class="btn btn-danger" id="s-clear">Clear everything (transactions, categories & rules)</button>
       </div>
     </div>
     <div class="modal-foot"><button class="btn" id="m-cancel">Close</button><button class="btn btn-primary" id="m-save">Save</button></div>
@@ -1637,9 +1640,29 @@ function openSettingsModal(){
   document.getElementById('s-load-sample').onclick = ()=>{
     DB = buildSeedDB(); scheduleSave(); closeModal(); renderContent(); toast('Sample data loaded');
   };
+  document.getElementById('s-restore').onclick = ()=> document.getElementById('s-restore-file').click();
+  document.getElementById('s-restore-file').addEventListener('change', (e)=>{
+    if(e.target.files.length) handleRestoreFile(e.target.files[0]);
+  });
+  document.getElementById('s-clear-tx').onclick = ()=>{
+    const n = DB.transactions.length;
+    openModal(`
+      <div class="modal-head"><h3>Remove all transactions?</h3></div>
+      <div class="modal-body"><p style="margin:0;color:var(--ink-soft);font-size:13px;">
+        This deletes all ${n} transaction${n===1?'':'s'} currently in your ledger — including the sample data, and anything you've added or imported since.
+        Your categories and auto-tagging rules are kept. This can't be undone.
+      </p></div>
+      <div class="modal-foot"><button class="btn" id="m-cancel2b">Cancel</button><button class="btn btn-danger" id="m-confirm2b">Remove transactions</button></div>
+    `);
+    document.getElementById('m-cancel2b').onclick = closeModal;
+    document.getElementById('m-confirm2b').onclick = ()=>{
+      DB.transactions = [];
+      scheduleSave(); closeModal(); renderContent(); toast('All transactions removed — categories and rules kept');
+    };
+  };
   document.getElementById('s-clear').onclick = ()=>{
     openModal(`
-      <div class="modal-head"><h3>Clear all data?</h3></div>
+      <div class="modal-head"><h3>Clear everything?</h3></div>
       <div class="modal-body"><p style="margin:0;color:var(--ink-soft);font-size:13px;">This removes every transaction, category and rule from this device. This can't be undone.</p></div>
       <div class="modal-foot"><button class="btn" id="m-cancel2">Cancel</button><button class="btn btn-danger" id="m-confirm2">Clear everything</button></div>
     `);
@@ -1648,6 +1671,44 @@ function openSettingsModal(){
       DB = buildEmptyDB(); scheduleSave(); closeModal(); renderContent(); toast('All data cleared');
     };
   };
+}
+function handleRestoreFile(file){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    let parsed;
+    try{ parsed = JSON.parse(e.target.result); }
+    catch(err){ toast('That file isn\u2019t valid JSON — is it a Pocket Ledger backup?', 'error'); return; }
+    if(!parsed || !Array.isArray(parsed.transactions) || !Array.isArray(parsed.categories)){
+      toast('That doesn\u2019t look like a Pocket Ledger backup file', 'error'); return;
+    }
+    const clean = {
+      startingBalance: typeof parsed.startingBalance==='number' ? parsed.startingBalance : 0,
+      categories: parsed.categories,
+      rules: Array.isArray(parsed.rules) ? parsed.rules : [],
+      transactions: parsed.transactions,
+    };
+    const currentCount = DB.transactions.length;
+    openModal(`
+      <div class="modal-head"><h3>Restore this backup?</h3></div>
+      <div class="modal-body">
+        <p style="margin:0 0 8px;color:var(--ink-soft);font-size:13px;">
+          This file contains <strong>${clean.transactions.length}</strong> transaction${clean.transactions.length===1?'':'s'} and ${clean.categories.length} categories.
+        </p>
+        <p style="margin:0;color:var(--ink-soft);font-size:13px;">
+          ${currentCount ? `Your current ${currentCount} transaction${currentCount===1?'':'s'} on this device will be <strong>replaced</strong> — export a backup first if you want to keep them.` : 'This device currently has no data, so nothing will be lost.'}
+        </p>
+      </div>
+      <div class="modal-foot"><button class="btn" id="m-cancel3">Cancel</button><button class="btn btn-primary" id="m-confirm3">Restore backup</button></div>
+    `);
+    document.getElementById('m-cancel3').onclick = closeModal;
+    document.getElementById('m-confirm3').onclick = ()=>{
+      DB = clean;
+      scheduleSave(); closeModal(); renderContent();
+      toast(`Restored ${clean.transactions.length} transactions`);
+    };
+  };
+  reader.onerror = ()=> toast('Could not read that file', 'error');
+  reader.readAsText(file);
 }
 function exportBackup(){
   const blob = new Blob([JSON.stringify(DB, null, 2)], {type:'application/json'});

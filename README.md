@@ -39,10 +39,10 @@ Once it's live on a real `https://` URL:
 
 Note: because each browser tab/site has its own separate storage, data
 you enter inside Claude and data you enter on a self-hosted copy won't
-be shared automatically — use the **Export backup** button (in the
-sidebar) to download a `.json` copy and move it between them if needed.
-A "restore backup" import isn't wired up yet — ask if you'd like that
-added.
+be shared automatically — use **Export backup** (sidebar) to download a
+`.json` copy, and **Settings → Restore from backup…** on the other copy
+to load it in. Restoring replaces whatever's currently on that device,
+so export first if you want to keep both.
 
 ## Importing a bank statement
 
