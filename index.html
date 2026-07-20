@@ -332,6 +332,8 @@ textarea{ resize:vertical; min-height:60px; }
 .rule-row .kw{ font-family:var(--font-mono); background:var(--surface-2); padding:2px 7px; border-radius:5px; }
 .rule-row .arrow{ color:var(--ink-faint); }
 .rule-row .rc{ flex:1; }
+.regular-toggle{ display:flex; align-items:center; gap:5px; font-size:11px; color:var(--ink-soft); white-space:nowrap; cursor:pointer; user-select:none; }
+.regular-toggle input{ accent-color:var(--brand); cursor:pointer; }
 
 /* ---------- Biggest movers ---------- */
 .movers-grid{ display:grid; grid-template-columns:1fr 1fr; gap:20px; }
@@ -349,6 +351,7 @@ textarea{ resize:vertical; min-height:60px; }
 .recurring-grid{ display:grid; grid-template-columns:1fr 1fr; gap:20px; }
 @media (max-width:560px){ .recurring-grid{ grid-template-columns:1fr; } }
 .recurring-grid .movers-desc{ white-space:normal; line-height:1.4; }
+.stamp-mini{ display:inline-block; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--gold); background:var(--gold-wash); border-radius:4px; padding:1px 5px; vertical-align:middle; }
 .qc-result{ margin-top:14px; }
 .qc-line{ display:flex; justify-content:space-between; padding:5px 0; font-size:12.5px; color:var(--ink-soft); }
 .qc-line .num{ font-family:var(--font-mono); font-weight:600; color:var(--ink); }
@@ -480,6 +483,7 @@ const DEFAULT_CATEGORIES = [
   {name:'Savings/Investment', kind:'expense'},
   {name:'Education', kind:'expense'},
   {name:'Travel', kind:'expense'},
+  {name:'Credit Card Payment', kind:'expense'},
   {name:'Other Expense', kind:'expense'},
 ];
 
@@ -543,6 +547,9 @@ function buildSeedDB(){
     for(let i=0;i<3;i++) tx.push({id:uid('tx'), date:dstr(Math.floor(rand()*27)+1), description:pick(['Nandos','Costa Coffee','Deliveroo']), amount:-rnd(8,35), category:'Dining Out', account:'Credit Card', notes:'', source:'sample'});
     for(let i=0;i<2;i++) tx.push({id:uid('tx'), date:dstr(Math.floor(rand()*27)+1), description:pick(['Cinema','Spotify','Steam Game']), amount:-rnd(10,45), category:'Entertainment', account:'Credit Card', notes:'', source:'sample'});
     tx.push({id:uid('tx'), date:dstr(1), description:'Transfer to savings', amount:-250.00, category:'Savings/Investment', account:'Current Account', notes:'', source:'sample'});
+    // Deliberately messy like a real credit card bill: different wording and a
+    // different amount each month, to demo category-level regular tracking.
+    tx.push({id:uid('tx'), date:dstr(clamp(22+Math.floor(rand()*4),1,27)), description:pick(['CARD PAYMENT REF 88213','PAYMENT THANK YOU','AMEX SETTLEMENT','CREDIT CARD BILL']), amount:-rnd(120,420), category:'Credit Card Payment', account:'Current Account', notes:'', source:'sample'});
   });
   tx.sort((a,b)=> a.date.localeCompare(b.date));
   return {
@@ -555,6 +562,7 @@ function buildSeedDB(){
       {id:uid('wish'), name:'Weekend trip', amount:220, targetDate:'', createdAt:todayISO()},
     ],
     dismissedRecurring: [],
+    regularCategories: ['Credit Card Payment'],
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -567,6 +575,7 @@ function buildEmptyDB(){
     transactions: [],
     wishlist: [],
     dismissedRecurring: [],
+    regularCategories: [],
   };
 }
 
@@ -1341,16 +1350,69 @@ function autoCategoriseAll(){
 /* =========================================================
    SPENDING PLAN
    ========================================================= */
+function computeManualRegular(){
+  const now = new Date();
+  const results = [];
+  DB.regularCategories.forEach(catName=>{
+    const cat = DB.categories.find(c=>c.name===catName);
+    if(!cat) return;
+    // Average over up to the last 3 *complete* months (excludes the current
+    // partial month so it isn't skewed by however much has posted so far).
+    const monthlyTotals = [];
+    for(let i=1;i<=3;i++){
+      const base = new Date(now.getFullYear(), now.getMonth()-i, 1);
+      const from = base.toISOString().slice(0,10);
+      const to = new Date(base.getFullYear(), base.getMonth()+1, 0).toISOString().slice(0,10);
+      const list = DB.transactions.filter(t=> t.category===catName && t.date>=from && t.date<=to);
+      if(list.length) monthlyTotals.push(list.reduce((s,t)=> s+Math.abs(t.amount), 0));
+    }
+    if(!monthlyTotals.length){
+      results.push({ key:'manual:'+catName, description:catName, category:catName, amount:0, kind:cat.kind, manual:true, noHistory:true, stillDue:false });
+      return;
+    }
+    const avg = monthlyTotals.reduce((s,v)=>s+v,0) / monthlyTotals.length;
+    const thisMonthFrom = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10);
+    const postedThisMonth = DB.transactions.some(t=> t.category===catName && t.date>=thisMonthFrom);
+    results.push({
+      key: 'manual:'+catName,
+      description: catName,
+      category: catName,
+      amount: cat.kind==='income' ? avg : -avg,
+      kind: cat.kind,
+      manual: true,
+      monthsOfHistory: monthlyTotals.length,
+      stillDue: !postedThisMonth,
+    });
+  });
+  return results;
+}
+
 function planNumbers(){
   const balance = currentBalance();
-  const recurringAll = detectRecurring().filter(r=> !DB.dismissedRecurring.includes(r.key));
-  const recurringIncome = recurringAll.filter(r=> r.amount>0).sort((a,b)=> a.nextExpected.localeCompare(b.nextExpected));
-  const recurringExpense = recurringAll.filter(r=> r.amount<0).sort((a,b)=> a.nextExpected.localeCompare(b.nextExpected));
+  const manualSet = new Set(DB.regularCategories);
+  // A category tracked manually supersedes any transaction-level auto-detection
+  // within that same category, so nothing gets counted twice.
+  const autoRaw = detectRecurring()
+    .filter(r=> !DB.dismissedRecurring.includes(r.key))
+    .filter(r=> !manualSet.has(r.category));
+  const manualRaw = computeManualRegular();
+
+  const nextIncomeDate = (()=>{
+    const dates = autoRaw.filter(r=> r.amount>0).map(r=> r.nextExpected).sort();
+    return dates.length ? dates[0] : null;
+  })();
+  const horizon = nextIncomeDate || addDays(todayISO(), 30);
+
+  const auto = autoRaw.map(r=> ({...r, manual:false, stillDue: r.nextExpected <= horizon}));
+  const all = [...auto, ...manualRaw];
+
+  const recurringIncome = all.filter(r=> r.manual ? r.kind==='income' : r.amount>0).sort((a,b)=> (a.nextExpected||'9999').localeCompare(b.nextExpected||'9999'));
+  const recurringExpense = all.filter(r=> r.manual ? r.kind!=='income' : r.amount<=0).sort((a,b)=> (a.nextExpected||'9999').localeCompare(b.nextExpected||'9999'));
+
   const regularMonthlyOutgoings = recurringExpense.reduce((s,r)=> s+Math.abs(r.amount), 0);
   const regularMonthlyIncome = recurringIncome.reduce((s,r)=> s+r.amount, 0);
-  const nextIncomeDate = recurringIncome.length ? recurringIncome[0].nextExpected : null;
-  const horizon = nextIncomeDate || addDays(todayISO(), 30);
-  const stillDueItems = recurringExpense.filter(r=> r.nextExpected <= horizon);
+
+  const stillDueItems = recurringExpense.filter(r=> r.stillDue);
   const stillDueTotal = stillDueItems.reduce((s,r)=> s+Math.abs(r.amount), 0);
   const wishlistTotal = DB.wishlist.reduce((s,w)=> s+w.amount, 0);
   const availableToSpend = balance - stillDueTotal - wishlistTotal;
@@ -1447,8 +1509,26 @@ function renderRecurringLists(n){
       toast('Dismissed — won\u2019t be counted as regular going forward');
     };
   });
+  document.querySelectorAll('[data-action="untrack-regular"]').forEach(b=>{
+    b.onclick = ()=>{
+      DB.regularCategories = DB.regularCategories.filter(n=> n!==b.dataset.name);
+      scheduleSave();
+      renderPlan(document.getElementById('content'));
+      toast('Stopped tracking ' + b.dataset.name + ' as regular');
+    };
+  });
 }
 function recurringRow(r){
+  if(r.manual){
+    const sub = r.noHistory
+      ? `<span style="color:var(--ink-faint);font-size:10.5px;">tracked as regular · no history yet</span>`
+      : `<span style="color:var(--ink-faint);font-size:10.5px;">est. from last ${r.monthsOfHistory} month${r.monthsOfHistory===1?'':'s'} · category average${r.stillDue?' · not posted yet this month':''}</span>`;
+    return `<div class="movers-row">
+      <span class="movers-desc" title="${escAttr(r.description)}">${escHTML(r.description)} <span class="stamp-mini">est.</span><br>${sub}</span>
+      <span class="movers-amt num" style="color:${r.amount>0?'var(--income)':'var(--ink)'}">${r.noHistory ? '—' : gbp(r.amount,{signed:true})}</span>
+      <button class="row-icon-btn" data-action="untrack-regular" data-name="${escAttr(r.category)}" title="Stop tracking this category as regular">${iconXSmall()}</button>
+    </div>`;
+  }
   return `<div class="movers-row">
     <span class="movers-desc" title="${escAttr(r.description)}">${escHTML(r.description)}<br><span style="color:var(--ink-faint);font-size:10.5px;">every ~${r.avgIntervalDays}d · next ~${ukDateShort(r.nextExpected)}</span></span>
     <span class="movers-amt num" style="color:${r.amount>0?'var(--income)':'var(--ink)'}">${gbp(r.amount,{signed:true})}</span>
@@ -1604,15 +1684,31 @@ function renderCatList(){
     return `<div style="margin-bottom:6px;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-faint);font-weight:700;margin:8px 2px 4px;">${label}</div>` +
       cats.map(cat=>{
         const used = DB.transactions.filter(t=>t.category===cat.name).length;
+        const isRegular = DB.regularCategories.includes(cat.name);
         return `<div class="cat-list-row">
           <span class="stamp ${kind==='income'?'c-income':'c-expense'}">${escHTML(cat.name)}</span>
           <span class="nm"></span>
           <span style="font-size:11.5px;color:var(--ink-faint);">${used} tx</span>
+          <label class="regular-toggle" title="Estimate this category as a regular monthly ${kind==='income'?'income':'cost'} in Spending Plan, from your recent history — useful when the transactions vary in amount or description, like a credit card bill.">
+            <input type="checkbox" data-action="toggle-regular" data-name="${escAttr(cat.name)}" ${isRegular?'checked':''}> Regular
+          </label>
           <button class="row-icon-btn" data-action="del-cat" data-name="${escAttr(cat.name)}" title="Delete">${iconTrash()}</button>
         </div>`;
       }).join('') + `</div>`;
   }).join('');
   host.querySelectorAll('[data-action="del-cat"]').forEach(b=> b.onclick = ()=> deleteCategory(b.dataset.name));
+  host.querySelectorAll('[data-action="toggle-regular"]').forEach(cb=>{
+    cb.onchange = (e)=>{
+      const name = e.target.dataset.name;
+      if(e.target.checked){
+        if(!DB.regularCategories.includes(name)) DB.regularCategories.push(name);
+      } else {
+        DB.regularCategories = DB.regularCategories.filter(n=>n!==name);
+      }
+      scheduleSave();
+      toast(e.target.checked ? `${name} will be estimated as regular in Spending Plan` : `${name} no longer tracked as regular`);
+    };
+  });
 }
 function renderRuleList(){
   const host = document.getElementById('rule-list');
@@ -1642,6 +1738,7 @@ function deleteCategory(name){
     DB.categories = DB.categories.filter(c=>c.name!==name);
     DB.transactions.forEach(t=>{ if(t.category===name) t.category=''; });
     DB.rules = DB.rules.filter(r=>r.category!==name);
+    DB.regularCategories = DB.regularCategories.filter(n=>n!==name);
     scheduleSave(); closeModal(); renderContent(); toast('Category deleted');
   };
 }
@@ -2179,6 +2276,7 @@ function handleRestoreFile(file){
       transactions: parsed.transactions,
       wishlist: Array.isArray(parsed.wishlist) ? parsed.wishlist : [],
       dismissedRecurring: Array.isArray(parsed.dismissedRecurring) ? parsed.dismissedRecurring : [],
+      regularCategories: Array.isArray(parsed.regularCategories) ? parsed.regularCategories : [],
     };
     const currentCount = DB.transactions.length;
     openModal(`
@@ -2223,6 +2321,7 @@ async function init(){
   DB = loaded || buildSeedDB();
   if(!DB.wishlist) DB.wishlist = [];
   if(!DB.dismissedRecurring) DB.dismissedRecurring = [];
+  if(!DB.regularCategories) DB.regularCategories = [];
   if(!loaded) scheduleSave();
 
   document.getElementById('nav').addEventListener('click', (e)=>{
