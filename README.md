@@ -2,8 +2,10 @@
 
 A personal income & spending tracker: dashboard with weekly/monthly/yearly
 analytics, a transactions log, bank statement (CSV) import with category
-assignment, and category/rule management. All your data is stored privately
-— nothing is sent to a server.
+assignment, category/rule management, and a Spending Plan that auto-detects
+your recurring bills/income and weighs planned purchases against what
+you can actually afford. All your data is stored privately — nothing is
+sent to a server.
 
 ## Files
 

@@ -345,6 +345,16 @@ textarea{ resize:vertical; min-height:60px; }
 .movers-amt{ font-family:var(--font-mono); font-weight:600; flex-shrink:0; font-size:12px; }
 @media (max-width:560px){ .movers-grid{ grid-template-columns:1fr; } }
 
+/* ---------- Spending plan ---------- */
+.recurring-grid{ display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+@media (max-width:560px){ .recurring-grid{ grid-template-columns:1fr; } }
+.recurring-grid .movers-desc{ white-space:normal; line-height:1.4; }
+.qc-result{ margin-top:14px; }
+.qc-line{ display:flex; justify-content:space-between; padding:5px 0; font-size:12.5px; color:var(--ink-soft); }
+.qc-line .num{ font-family:var(--font-mono); font-weight:600; color:var(--ink); }
+.qc-line.qc-total{ border-top:1px solid var(--line); margin-top:4px; padding-top:9px; font-weight:700; font-size:13.5px; color:var(--ink); }
+.qc-line.qc-total .num{ font-size:15px; }
+
 /* ---------- Empty state ---------- */
 .empty-state{ text-align:center; padding:50px 20px; color:var(--ink-soft); }
 .empty-state svg{ width:40px;height:40px; color:var(--ink-faint); margin-bottom:10px; }
@@ -407,6 +417,10 @@ textarea{ resize:vertical; min-height:60px; }
       <button class="nav-item" data-tab="categories">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.6 12.6 12.6 20.6a2 2 0 0 1-2.8 0l-8-8a2 2 0 0 1 0-2.8L9.8 1.8a2 2 0 0 1 1.4-.6H18a2 2 0 0 1 2 2v6.4a2 2 0 0 1-.6 1.4Z"/><circle cx="15.5" cy="6.5" r="1.5"/></svg>
         <span class="lbl">Categories</span>
+      </button>
+      <button class="nav-item" data-tab="plan">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="0.6" fill="currentColor"/></svg>
+        <span class="lbl">Spending Plan</span>
       </button>
     </nav>
     <div class="sidebar-foot">
@@ -536,6 +550,11 @@ function buildSeedDB(){
     categories: JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
     rules: JSON.parse(JSON.stringify(DEFAULT_RULES)),
     transactions: tx,
+    wishlist: [
+      {id:uid('wish'), name:'New laptop', amount:850, targetDate:'', createdAt:todayISO()},
+      {id:uid('wish'), name:'Weekend trip', amount:220, targetDate:'', createdAt:todayISO()},
+    ],
+    dismissedRecurring: [],
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -546,6 +565,8 @@ function buildEmptyDB(){
     categories: JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
     rules: JSON.parse(JSON.stringify(DEFAULT_RULES)),
     transactions: [],
+    wishlist: [],
+    dismissedRecurring: [],
   };
 }
 
@@ -669,6 +690,68 @@ function sumExpense(list){ return list.reduce((s,t)=> t.amount<0 ? s+Math.abs(t.
 function currentBalance(){
   return DB.startingBalance + DB.transactions.reduce((s,t)=> s+t.amount, 0);
 }
+
+/* ---------- recurring transaction detection ---------- */
+function normalizeDescForRecurring(desc){
+  return String(desc||'')
+    .toUpperCase()
+    .replace(/[0-9]/g,' ')       // strip reference numbers / embedded dates
+    .replace(/[^A-Z ]/g,' ')     // strip punctuation
+    .replace(/\s+/g,' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean)
+    .slice(0,3)                  // first 3 significant words is usually the merchant/payee
+    .join(' ');
+}
+function daysBetween(a,b){
+  return Math.round((new Date(b+'T00:00:00') - new Date(a+'T00:00:00')) / 86400000);
+}
+function recurringKey(descKey, amount){ return descKey+'|'+Math.round(amount); }
+function detectRecurring(){
+  const byDesc = {};
+  DB.transactions.forEach(t=>{
+    const key = normalizeDescForRecurring(t.description);
+    if(!key) return;
+    (byDesc[key] = byDesc[key] || []).push(t);
+  });
+  const results = [];
+  Object.entries(byDesc).forEach(([descKey, txs])=>{
+    if(txs.length < 2) return;
+    // Cluster same-description transactions by similar amount (tolerant of a
+    // few pence of rounding, but not genuinely different amounts).
+    const sorted = [...txs].sort((a,b)=> a.amount-b.amount);
+    const clusters = [];
+    sorted.forEach(t=>{
+      const c = clusters.find(c=> Math.abs(t.amount - c.avg) <= Math.max(1, Math.abs(c.avg)*0.05));
+      if(c){ c.items.push(t); c.avg = c.items.reduce((s,x)=>s+x.amount,0)/c.items.length; }
+      else clusters.push({avg:t.amount, items:[t]});
+    });
+    clusters.forEach(c=>{
+      if(c.items.length < 2) return;
+      const byDate = [...c.items].sort((a,b)=> a.date.localeCompare(b.date));
+      const gaps = [];
+      for(let i=1;i<byDate.length;i++) gaps.push(daysBetween(byDate[i-1].date, byDate[i].date));
+      const avgGap = gaps.reduce((s,g)=>s+g,0)/gaps.length;
+      // "Roughly monthly": every gap between 10–45 days, averaging 24–36 days.
+      // Loose enough to survive weekends/bank holidays shifting a date a bit.
+      const plausible = gaps.every(g=> g>=10 && g<=45) && avgGap>=24 && avgGap<=36;
+      if(!plausible) return;
+      const last = byDate[byDate.length-1];
+      results.push({
+        key: recurringKey(descKey, c.avg),
+        description: last.description,
+        amount: c.avg,
+        category: last.category,
+        occurrences: byDate.length,
+        avgIntervalDays: Math.round(avgGap),
+        lastDate: last.date,
+        nextExpected: addDays(last.date, Math.round(avgGap)),
+      });
+    });
+  });
+  return results.sort((a,b)=> a.amount - b.amount);
+}
 function periodRange(period){
   const now = new Date();
   if(period==='month'){
@@ -734,6 +817,7 @@ const NAV_ICONS_TITLE = {
   transactions: ['Transactions','Every income and outgoing you\u2019ve logged or imported.'],
   import: ['Import statement','Bring in a CSV from your bank and assign categories in bulk.'],
   categories: ['Categories','Manage the groups used across your dashboard and imports, and the auto-tagging rules.'],
+  plan: ['Spending Plan','What you can actually afford, based on your balance and regular bills.'],
 };
 
 function setTab(tab){
@@ -768,6 +852,9 @@ function renderTopbarActions(){
   } else if(UI.tab==='categories'){
     host.innerHTML = `<button class="btn btn-primary" id="btn-add-cat">${iconPlus()} Add category</button>`;
     document.getElementById('btn-add-cat').onclick = ()=> openCategoryModal(null);
+  } else if(UI.tab==='plan'){
+    host.innerHTML = `<button class="btn btn-primary" id="btn-add-wish">${iconPlus()} Add to wishlist</button>`;
+    document.getElementById('btn-add-wish').onclick = ()=> openWishModal(null);
   } else {
     host.innerHTML = '';
   }
@@ -785,6 +872,7 @@ function renderContent(){
   else if(UI.tab==='transactions') renderTransactions(c);
   else if(UI.tab==='import') renderImport(c);
   else if(UI.tab==='categories') renderCategories(c);
+  else if(UI.tab==='plan') renderPlan(c);
 }
 
 /* =========================================================
@@ -1248,6 +1336,241 @@ function autoCategoriseAll(){
   });
   if(count){ scheduleSave(); renderContent(); toast(`Auto-categorised ${count} transaction${count===1?'':'s'}`); }
   else toast('No matching rules for your uncategorised transactions');
+}
+
+/* =========================================================
+   SPENDING PLAN
+   ========================================================= */
+function planNumbers(){
+  const balance = currentBalance();
+  const recurringAll = detectRecurring().filter(r=> !DB.dismissedRecurring.includes(r.key));
+  const recurringIncome = recurringAll.filter(r=> r.amount>0).sort((a,b)=> a.nextExpected.localeCompare(b.nextExpected));
+  const recurringExpense = recurringAll.filter(r=> r.amount<0).sort((a,b)=> a.nextExpected.localeCompare(b.nextExpected));
+  const regularMonthlyOutgoings = recurringExpense.reduce((s,r)=> s+Math.abs(r.amount), 0);
+  const regularMonthlyIncome = recurringIncome.reduce((s,r)=> s+r.amount, 0);
+  const nextIncomeDate = recurringIncome.length ? recurringIncome[0].nextExpected : null;
+  const horizon = nextIncomeDate || addDays(todayISO(), 30);
+  const stillDueItems = recurringExpense.filter(r=> r.nextExpected <= horizon);
+  const stillDueTotal = stillDueItems.reduce((s,r)=> s+Math.abs(r.amount), 0);
+  const wishlistTotal = DB.wishlist.reduce((s,w)=> s+w.amount, 0);
+  const availableToSpend = balance - stillDueTotal - wishlistTotal;
+  return { balance, recurringIncome, recurringExpense, regularMonthlyOutgoings, regularMonthlyIncome,
+    nextIncomeDate, horizon, stillDueItems, stillDueTotal, wishlistTotal, availableToSpend };
+}
+
+function renderPlan(c){
+  const n = planNumbers();
+  const horizonLabel = n.nextIncomeDate ? `before your next expected pay (~${ukDateShort(n.horizon)})` : `in the next 30 days`;
+
+  c.innerHTML = `
+    <div class="kpi-row">
+      <div class="kpi-card balance"><div class="stripe"></div><div class="kpi-lbl">Current balance</div><div class="kpi-val num" style="color:var(--gold)">${gbp(n.balance)}</div><div class="kpi-sub">Right now, all accounts</div></div>
+      <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Bills still due</div><div class="kpi-val expense num">${gbp(n.stillDueTotal)}</div><div class="kpi-sub">${n.stillDueItems.length} item${n.stillDueItems.length===1?'':'s'}, ${horizonLabel}</div></div>
+      <div class="kpi-card net"><div class="stripe"></div><div class="kpi-lbl">Wishlist committed</div><div class="kpi-val num">${gbp(n.wishlistTotal)}</div><div class="kpi-sub">${DB.wishlist.length} planned purchase${DB.wishlist.length===1?'':'s'}</div></div>
+      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Available to spend</div><div class="kpi-val income num" style="color:${n.availableToSpend>=0?'var(--income)':'var(--expense)'}">${gbp(n.availableToSpend)}</div><div class="kpi-sub">Balance minus bills due minus wishlist</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Detected recurring<small>Auto-spotted from your transaction history — dismiss anything that's wrong</small></div></div>
+        <div class="recurring-grid">
+          <div>
+            <div class="movers-col-title income">Regular income · ${gbp(n.regularMonthlyIncome)}/mo</div>
+            <div id="recurring-income"></div>
+          </div>
+          <div>
+            <div class="movers-col-title expense">Regular outgoings · ${gbp(n.regularMonthlyOutgoings)}/mo</div>
+            <div id="recurring-expense"></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Quick check<small>See the effect of a purchase without committing to it</small></div></div>
+        <div class="field" style="max-width:220px;">
+          <label>If I spent (£)</label>
+          <input type="number" id="qc-amount" min="0" step="0.01" placeholder="0.00">
+        </div>
+        <div id="qc-result" class="qc-result"></div>
+        <button class="btn btn-sm" id="qc-add-wish" style="margin-top:10px;" disabled>${iconPlus()} Add this to wishlist</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px;">
+      <div class="panel-head">
+        <div class="panel-title">Wishlist<small>Purchases you're weighing up, stacked against what you can actually spend</small></div>
+      </div>
+      <div id="wishlist-body"></div>
+    </div>
+  `;
+
+  renderRecurringLists(n);
+  renderWishlist(n);
+
+  const qcAmount = document.getElementById('qc-amount');
+  const qcResult = document.getElementById('qc-result');
+  const qcAddBtn = document.getElementById('qc-add-wish');
+  function updateQuickCheck(){
+    const v = parseFloat(qcAmount.value);
+    if(isNaN(v) || v<=0){
+      qcResult.innerHTML = '';
+      qcAddBtn.disabled = true;
+      return;
+    }
+    const after = n.availableToSpend - v;
+    qcResult.innerHTML = `
+      <div class="qc-line"><span>Available to spend now</span><span class="num">${gbp(n.availableToSpend)}</span></div>
+      <div class="qc-line"><span>This purchase</span><span class="num">−${gbp(v)}</span></div>
+      <div class="qc-line qc-total"><span>Left afterward</span><span class="num" style="color:${after>=0?'var(--income)':'var(--expense)'}">${gbp(after)}</span></div>
+    `;
+    qcAddBtn.disabled = false;
+  }
+  qcAmount.addEventListener('input', updateQuickCheck);
+  qcAddBtn.onclick = ()=>{
+    const v = parseFloat(qcAmount.value);
+    if(isNaN(v) || v<=0) return;
+    openWishModal(null, v);
+  };
+}
+
+function renderRecurringLists(n){
+  const incomeHost = document.getElementById('recurring-income');
+  const expenseHost = document.getElementById('recurring-expense');
+  incomeHost.innerHTML = n.recurringIncome.length ? n.recurringIncome.map(recurringRow).join('') :
+    `<div class="empty-state" style="padding:16px 0;"><p style="font-size:12px;margin:0;">No recurring income detected yet.</p></div>`;
+  expenseHost.innerHTML = n.recurringExpense.length ? n.recurringExpense.map(recurringRow).join('') :
+    `<div class="empty-state" style="padding:16px 0;"><p style="font-size:12px;margin:0;">No recurring bills detected yet.</p></div>`;
+  document.querySelectorAll('[data-action="dismiss-recurring"]').forEach(b=>{
+    b.onclick = ()=>{
+      DB.dismissedRecurring.push(b.dataset.key);
+      scheduleSave();
+      renderPlan(document.getElementById('content'));
+      toast('Dismissed — won\u2019t be counted as regular going forward');
+    };
+  });
+}
+function recurringRow(r){
+  return `<div class="movers-row">
+    <span class="movers-desc" title="${escAttr(r.description)}">${escHTML(r.description)}<br><span style="color:var(--ink-faint);font-size:10.5px;">every ~${r.avgIntervalDays}d · next ~${ukDateShort(r.nextExpected)}</span></span>
+    <span class="movers-amt num" style="color:${r.amount>0?'var(--income)':'var(--ink)'}">${gbp(r.amount,{signed:true})}</span>
+    <button class="row-icon-btn" data-action="dismiss-recurring" data-key="${escAttr(r.key)}" title="Not actually recurring">${iconXSmall()}</button>
+  </div>`;
+}
+function iconXSmall(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`; }
+
+function renderWishlist(n){
+  const host = document.getElementById('wishlist-body');
+  if(!DB.wishlist.length){
+    host.innerHTML = `<div class="empty-state" style="padding:30px 10px;"><h4>Nothing on your wishlist yet</h4><p style="font-size:12.5px;">Add a purchase you're considering to see how it stacks up against what you can spend.</p></div>`;
+    return;
+  }
+  let running = 0;
+  const rows = DB.wishlist.map((w,i)=>{
+    running += w.amount;
+    const after = n.availableToSpend - running;
+    return `<tr>
+      <td>${i+1}</td>
+      <td class="desc">${escHTML(w.name)}</td>
+      <td>${w.targetDate ? ukDateShort(w.targetDate) : '<span style="color:var(--ink-faint);">—</span>'}</td>
+      <td class="amt num">${gbp(w.amount)}</td>
+      <td class="amt num" style="color:${after>=0?'var(--ink)':'var(--expense)'}">${gbp(after)}</td>
+      <td class="row-actions">
+        <button class="row-icon-btn" data-action="wish-up" data-id="${w.id}" title="Move up" ${i===0?'disabled':''}>${iconChevronUp()}</button>
+        <button class="row-icon-btn" data-action="wish-down" data-id="${w.id}" title="Move down" ${i===DB.wishlist.length-1?'disabled':''}>${iconChevronDown()}</button>
+        <button class="row-icon-btn" data-action="wish-buy" data-id="${w.id}" title="Mark as bought — logs it as a transaction">${iconCheck()}</button>
+        <button class="row-icon-btn" data-action="wish-edit" data-id="${w.id}" title="Edit">${iconEdit()}</button>
+        <button class="row-icon-btn" data-action="wish-delete" data-id="${w.id}" title="Remove">${iconTrash()}</button>
+      </td>
+    </tr>`;
+  }).join('');
+  host.innerHTML = `<div class="table-wrap"><table><thead><tr>
+      <th>#</th><th>Purchase</th><th>Target date</th><th style="text-align:right;">Amount</th><th style="text-align:right;">Left after</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
+
+  host.querySelectorAll('[data-action="wish-up"]').forEach(b=> b.onclick = ()=> moveWish(b.dataset.id,-1));
+  host.querySelectorAll('[data-action="wish-down"]').forEach(b=> b.onclick = ()=> moveWish(b.dataset.id,1));
+  host.querySelectorAll('[data-action="wish-buy"]').forEach(b=> b.onclick = ()=> buyWish(b.dataset.id));
+  host.querySelectorAll('[data-action="wish-edit"]').forEach(b=> b.onclick = ()=> openWishModal(b.dataset.id));
+  host.querySelectorAll('[data-action="wish-delete"]').forEach(b=> b.onclick = ()=> deleteWish(b.dataset.id));
+}
+function iconChevronUp(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"/></svg>`; }
+function iconChevronDown(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`; }
+function iconCheck(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>`; }
+
+function moveWish(id, dir){
+  const i = DB.wishlist.findIndex(w=>w.id===id);
+  const j = i+dir;
+  if(i<0 || j<0 || j>=DB.wishlist.length) return;
+  [DB.wishlist[i], DB.wishlist[j]] = [DB.wishlist[j], DB.wishlist[i]];
+  scheduleSave(); renderPlan(document.getElementById('content'));
+}
+function deleteWish(id){
+  const w = DB.wishlist.find(x=>x.id===id);
+  if(!w) return;
+  openModal(`
+    <div class="modal-head"><h3>Remove from wishlist?</h3></div>
+    <div class="modal-body"><p style="margin:0;color:var(--ink-soft);font-size:13px;">${escHTML(w.name)} — ${gbp(w.amount)}</p></div>
+    <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-danger" id="m-confirm">Remove</button></div>
+  `);
+  document.getElementById('m-cancel').onclick = closeModal;
+  document.getElementById('m-confirm').onclick = ()=>{
+    DB.wishlist = DB.wishlist.filter(x=>x.id!==id);
+    scheduleSave(); closeModal(); renderPlan(document.getElementById('content')); toast('Removed from wishlist');
+  };
+}
+function buyWish(id){
+  const w = DB.wishlist.find(x=>x.id===id);
+  if(!w) return;
+  openModal(`
+    <div class="modal-head"><h3>Mark as bought</h3></div>
+    <div class="modal-body">
+      <p style="margin:0 0 14px;color:var(--ink-soft);font-size:13px;">This logs it as an expense transaction today and removes it from your wishlist.</p>
+      <div class="form-grid">
+        <div class="field span2"><label>Description</label><input type="text" id="buy-desc" value="${escAttr(w.name)}"></div>
+        <div class="field"><label>Amount (£)</label><input type="number" id="buy-amount" min="0" step="0.01" value="${w.amount.toFixed(2)}"></div>
+        <div class="field"><label>Category</label><select id="buy-category">${categoryOptionsHTML('', {includeUncategorized:true})}</select></div>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-confirm">Log purchase</button></div>
+  `);
+  document.getElementById('m-cancel').onclick = closeModal;
+  document.getElementById('m-confirm').onclick = ()=>{
+    const desc = document.getElementById('buy-desc').value.trim() || w.name;
+    const amt = parseFloat(document.getElementById('buy-amount').value);
+    const cat = document.getElementById('buy-category').value;
+    if(isNaN(amt) || amt<=0){ toast('Enter a valid amount', 'error'); return; }
+    DB.transactions.push({id:uid('tx'), date:todayISO(), description:desc, amount:-Math.abs(amt), category:cat, account:'', notes:'Bought from wishlist', source:'manual'});
+    DB.wishlist = DB.wishlist.filter(x=>x.id!==id);
+    scheduleSave(); closeModal(); renderContent();
+    toast('Logged as a transaction and removed from wishlist');
+  };
+}
+function openWishModal(id, prefillAmount){
+  const w = id ? DB.wishlist.find(x=>x.id===id) : null;
+  openModal(`
+    <div class="modal-head"><h3>${w?'Edit wishlist item':'Add to wishlist'}</h3></div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="field span2"><label>What is it?</label><input type="text" id="w-name" value="${w?escAttr(w.name):''}" placeholder="e.g. New laptop"></div>
+        <div class="field"><label>Amount (£)</label><input type="number" id="w-amount" min="0" step="0.01" value="${w?w.amount.toFixed(2):(prefillAmount?prefillAmount.toFixed(2):'')}"></div>
+        <div class="field"><label>Target date (optional)</label><input type="date" id="w-date" value="${w?(w.targetDate||''):''}"></div>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">${w?'Save changes':'Add to wishlist'}</button></div>
+  `);
+  document.getElementById('m-cancel').onclick = closeModal;
+  document.getElementById('m-save').onclick = ()=>{
+    const name = document.getElementById('w-name').value.trim();
+    const amount = parseFloat(document.getElementById('w-amount').value);
+    const targetDate = document.getElementById('w-date').value;
+    if(!name || isNaN(amount) || amount<=0){ toast('Enter a name and a positive amount', 'error'); return; }
+    if(w){
+      Object.assign(w, {name, amount, targetDate});
+    } else {
+      DB.wishlist.push({id:uid('wish'), name, amount, targetDate, createdAt:todayISO()});
+    }
+    scheduleSave(); closeModal(); renderContent();
+    toast(w?'Wishlist item updated':'Added to wishlist');
+  };
 }
 
 /* =========================================================
@@ -1854,6 +2177,8 @@ function handleRestoreFile(file){
       categories: parsed.categories,
       rules: Array.isArray(parsed.rules) ? parsed.rules : [],
       transactions: parsed.transactions,
+      wishlist: Array.isArray(parsed.wishlist) ? parsed.wishlist : [],
+      dismissedRecurring: Array.isArray(parsed.dismissedRecurring) ? parsed.dismissedRecurring : [],
     };
     const currentCount = DB.transactions.length;
     openModal(`
@@ -1896,6 +2221,8 @@ async function init(){
 
   const loaded = await loadDB();
   DB = loaded || buildSeedDB();
+  if(!DB.wishlist) DB.wishlist = [];
+  if(!DB.dismissedRecurring) DB.dismissedRecurring = [];
   if(!loaded) scheduleSave();
 
   document.getElementById('nav').addEventListener('click', (e)=>{
