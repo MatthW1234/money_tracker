@@ -1,11 +1,13 @@
 # Pocket Ledger
 
 A personal income & spending tracker: dashboard with weekly/monthly/yearly
-analytics, a transactions log, bank statement (CSV) import with category
-assignment, category/rule management, and a Spending Plan that auto-detects
-your recurring bills/income and weighs planned purchases against what
-you can actually afford. All your data is stored privately — nothing is
-sent to a server.
+analytics, budgets with progress bars, month-vs-month comparisons, a
+transactions log, bank statement (CSV) import with category assignment,
+category/rule management, and a Spending Plan that auto-detects your
+recurring bills/income (or estimates them from category history when the
+transactions vary too much to match automatically), shows what's coming up,
+and weighs planned purchases against what you can actually afford. All your
+data is stored privately — nothing is sent to a server.
 
 ## Files
 

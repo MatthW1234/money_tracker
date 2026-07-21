@@ -326,7 +326,9 @@ textarea{ resize:vertical; min-height:60px; }
 /* ---------- Categories tab ---------- */
 .cat-cols{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
 .cat-list{ display:flex; flex-direction:column; gap:6px; margin-top:10px; }
-.cat-list-row{ display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; }
+.cat-list-row{ display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; flex-wrap:wrap; }
+.budget-input-wrap{ display:flex; align-items:center; gap:4px; font-size:11px; color:var(--ink-soft); white-space:nowrap; }
+.budget-input{ width:52px; padding:3px 5px; font-size:11.5px; border-radius:5px; }
 .cat-list-row .nm{ flex:1; font-weight:600; font-size:13px; }
 .rule-row{ display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:12.5px; }
 .rule-row .kw{ font-family:var(--font-mono); background:var(--surface-2); padding:2px 7px; border-radius:5px; }
@@ -352,11 +354,37 @@ textarea{ resize:vertical; min-height:60px; }
 @media (max-width:560px){ .recurring-grid{ grid-template-columns:1fr; } }
 .recurring-grid .movers-desc{ white-space:normal; line-height:1.4; }
 .stamp-mini{ display:inline-block; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--gold); background:var(--gold-wash); border-radius:4px; padding:1px 5px; vertical-align:middle; }
+.upcoming-row{ display:flex; align-items:center; gap:14px; padding:9px 0; border-bottom:1px solid var(--line); font-size:13px; }
+.upcoming-row:last-child{ border-bottom:none; }
+.upcoming-date{ width:70px; flex-shrink:0; text-align:center; }
+.upcoming-day{ font-size:12px; font-weight:700; color:var(--ink); }
+.upcoming-rel{ font-size:10px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.03em; }
+.upcoming-desc{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.upcoming-amt{ font-weight:600; flex-shrink:0; }
+.upcoming-subhead{ font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-faint); font-weight:700; padding:12px 0 6px; border-top:1px dashed var(--line); margin-top:4px; }
+.upcoming-subhead:first-child{ border-top:none; margin-top:0; padding-top:0; }
 .qc-result{ margin-top:14px; }
 .qc-line{ display:flex; justify-content:space-between; padding:5px 0; font-size:12.5px; color:var(--ink-soft); }
 .qc-line .num{ font-family:var(--font-mono); font-weight:600; color:var(--ink); }
 .qc-line.qc-total{ border-top:1px solid var(--line); margin-top:4px; padding-top:9px; font-weight:700; font-size:13.5px; color:var(--ink); }
 .qc-line.qc-total .num{ font-size:15px; }
+
+/* ---------- Budgets ---------- */
+.budget-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; }
+.budget-row-top{ display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; }
+.budget-name{ font-size:12.5px; font-weight:600; }
+.budget-figures{ font-size:12px; }
+.budget-bar-track{ height:7px; border-radius:20px; background:var(--surface-2); border:1px solid var(--line); overflow:hidden; }
+.budget-bar-fill{ height:100%; border-radius:20px; transition:width .3s ease; }
+.budget-pct{ font-size:10.5px; font-weight:600; margin-top:4px; }
+
+/* ---------- Compare ---------- */
+.compare-stats{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:16px; }
+.compare-stat{ background:var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+.compare-stat-lbl{ font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-soft); font-weight:700; }
+.compare-stat-val{ font-size:19px; font-weight:600; margin-top:4px; }
+.compare-stat-delta{ font-size:11.5px; font-weight:600; margin-top:3px; }
+@media (max-width:640px){ .compare-stats{ grid-template-columns:1fr; } }
 
 /* ---------- Empty state ---------- */
 .empty-state{ text-align:center; padding:50px 20px; color:var(--ink-soft); }
@@ -563,6 +591,7 @@ function buildSeedDB(){
     ],
     dismissedRecurring: [],
     regularCategories: ['Credit Card Payment'],
+    budgets: { 'Groceries':400, 'Dining Out':150, 'Entertainment':100, 'Transport':120, 'Subscriptions':80 },
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -576,6 +605,7 @@ function buildEmptyDB(){
     wishlist: [],
     dismissedRecurring: [],
     regularCategories: [],
+    budgets: {},
   };
 }
 
@@ -775,6 +805,20 @@ function periodRange(period){
   }
   return {from:'0000-01-01', to:'9999-12-31', label:'All time'};
 }
+function previousPeriodRange(period){
+  const now = new Date();
+  if(period==='month'){
+    const base = new Date(now.getFullYear(), now.getMonth() + UI.dashboardMonthOffset - 1, 1);
+    const from = base.toISOString().slice(0,10);
+    const to = new Date(base.getFullYear(), base.getMonth()+1, 0).toISOString().slice(0,10);
+    return {from, to, label: base.toLocaleDateString('en-GB',{month:'long', year:'numeric'})};
+  }
+  if(period==='year'){
+    const y = now.getFullYear() + UI.dashboardYearOffset - 1;
+    return {from:`${y}-01-01`, to:`${y}-12-31`, label:String(y)};
+  }
+  return null;
+}
 
 /* ---------- utils: escaping ---------- */
 function escHTML(s){ return String(s??'').replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
@@ -813,6 +857,7 @@ const UI = {
   tab: 'dashboard',
   dashboardPeriod: 'month',
   dashboardMonthOffset: 0,
+  upcomingDays: 30,
   dashboardYearOffset: 0,
   trendGran: 'month',
   txSort: {col:'date', dir:'desc'},
@@ -893,6 +938,18 @@ function renderDashboard(c){
   const income = sumIncome(list), expense = sumExpense(list), net = income-expense;
   const balance = currentBalance();
 
+  const budgetEntries = Object.entries(DB.budgets);
+  const showBudgets = UI.dashboardPeriod==='month' && budgetEntries.length>0;
+
+  const prevRange = previousPeriodRange(UI.dashboardPeriod);
+  const showCompare = !!prevRange;
+  let prevList = [], prevIncome=0, prevExpense=0;
+  if(showCompare){
+    prevList = txInRange(prevRange.from, prevRange.to);
+    prevIncome = sumIncome(prevList);
+    prevExpense = sumExpense(prevList);
+  }
+
   const offset = UI.dashboardPeriod==='month' ? UI.dashboardMonthOffset : (UI.dashboardPeriod==='year' ? UI.dashboardYearOffset : 0);
   const canNav = UI.dashboardPeriod==='month' || UI.dashboardPeriod==='year';
 
@@ -958,6 +1015,23 @@ function renderDashboard(c){
       </div>
     </div>
 
+    ${showBudgets ? `
+    <div class="panel" style="margin-top:16px;">
+      <div class="panel-head"><div class="panel-title">Budgets<small>${range.label}</small></div></div>
+      <div id="budget-list"></div>
+    </div>` : ''}
+
+    ${showCompare ? `
+    <div class="panel" style="margin-top:16px;">
+      <div class="panel-head"><div class="panel-title">Compare to ${escHTML(prevRange.label)}<small>How this period stacks up against the one before it</small></div></div>
+      <div class="compare-stats">
+        ${compareStatHTML('Income', income, prevIncome, true)}
+        ${compareStatHTML('Expenses', expense, prevExpense, false)}
+        ${compareStatHTML('Net', net, prevIncome-prevExpense, true)}
+      </div>
+      <div id="compare-table"></div>
+    </div>` : ''}
+
     <div class="panel" style="margin-top:16px;">
       <div class="panel-head"><div class="panel-title">Recent activity</div><button class="btn btn-sm btn-ghost" id="view-all-tx">View all →</button></div>
       <div class="table-wrap"><table><thead><tr><th>Date</th><th>Description</th><th>Category</th><th style="text-align:right;">Amount</th></tr></thead><tbody id="recent-body"></tbody></table></div>
@@ -1003,6 +1077,63 @@ function renderDashboard(c){
   drawCategoryChart(list);
   drawYTDChart();
   renderMovers(list);
+  if(showBudgets) renderBudgets(list, budgetEntries);
+  if(showCompare) renderCompareTable(list, prevList);
+}
+function compareStatHTML(label, current, previous, higherIsGood){
+  const delta = current - previous;
+  const pct = previous>0.004 ? Math.round(delta/previous*100) : (current>0.004 ? null : 0);
+  const good = higherIsGood ? delta>=0 : delta<=0;
+  const deltaColor = Math.abs(delta)<0.005 ? 'var(--ink-faint)' : (good ? 'var(--income)' : 'var(--expense)');
+  const pctLabel = pct===null ? 'new' : `${delta>=0?'+':''}${pct}%`;
+  return `<div class="compare-stat">
+    <div class="compare-stat-lbl">${label}</div>
+    <div class="compare-stat-val num">${gbp(current)}</div>
+    <div class="compare-stat-delta" style="color:${deltaColor}">${delta>=0?'▲':'▼'} ${gbp(Math.abs(delta))} (${pctLabel})</div>
+  </div>`;
+}
+function renderBudgets(list, budgetEntries){
+  const host = document.getElementById('budget-list');
+  if(!host) return;
+  const rows = budgetEntries.map(([catName, limit])=>{
+    const spent = list.filter(t=> t.category===catName && t.amount<0).reduce((s,t)=> s+Math.abs(t.amount), 0);
+    const pct = limit>0 ? Math.min(999, Math.round(spent/limit*100)) : 0;
+    const color = pct>=100 ? 'var(--expense)' : (pct>=80 ? 'var(--gold)' : 'var(--income)');
+    return `<div class="budget-row">
+      <div class="budget-row-top">
+        <span class="budget-name">${escHTML(catName)}</span>
+        <span class="budget-figures num">${gbp(spent)} <span style="color:var(--ink-faint);">/ ${gbp(limit)}</span></span>
+      </div>
+      <div class="budget-bar-track"><div class="budget-bar-fill" style="width:${Math.min(100,pct)}%; background:${color};"></div></div>
+      <div class="budget-pct" style="color:${color};">${pct}% ${pct>=100?'over budget':'used'}</div>
+    </div>`;
+  }).join('');
+  host.innerHTML = `<div class="budget-grid">${rows}</div>`;
+}
+function renderCompareTable(list, prevList){
+  const host = document.getElementById('compare-table');
+  if(!host) return;
+  const byCat = {};
+  list.forEach(t=>{ if(t.amount<0){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].cur+=Math.abs(t.amount); } });
+  prevList.forEach(t=>{ if(t.amount<0){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].prev+=Math.abs(t.amount); } });
+  const rows = Object.entries(byCat)
+    .map(([name,v])=> ({name, ...v, delta:v.cur-v.prev}))
+    .sort((a,b)=> Math.abs(b.delta)-Math.abs(a.delta))
+    .slice(0,10);
+  if(!rows.length){ host.innerHTML = `<div class="empty-state" style="padding:20px;"><p style="font-size:12.5px;">No expenses in either period to compare yet.</p></div>`; return; }
+  host.innerHTML = `<div class="table-wrap"><table><thead><tr>
+      <th>Category</th><th style="text-align:right;">This period</th><th style="text-align:right;">Last period</th><th style="text-align:right;">Change</th>
+    </tr></thead><tbody>${rows.map(r=>{
+      const pct = r.prev>0.004 ? Math.round(r.delta/r.prev*100) : (r.cur>0.004 ? null : 0);
+      const pctLabel = pct===null ? 'new' : `${r.delta>=0?'+':''}${pct}%`;
+      const color = Math.abs(r.delta)<0.005 ? 'var(--ink-faint)' : (r.delta>0 ? 'var(--expense)' : 'var(--income)');
+      return `<tr>
+        <td>${escHTML(r.name)}</td>
+        <td class="amt num">${gbp(r.cur)}</td>
+        <td class="amt num" style="color:var(--ink-faint);">${gbp(r.prev)}</td>
+        <td class="amt num" style="color:${color};">${r.delta>=0?'+':''}${gbp(r.delta)} (${pctLabel})</td>
+      </tr>`;
+    }).join('')}</tbody></table></div>`;
 }
 function renderMovers(list){
   const income = list.filter(t=>t.amount>0).sort((a,b)=>b.amount-a.amount).slice(0,5);
@@ -1432,7 +1563,18 @@ function renderPlan(c){
       <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Available to spend</div><div class="kpi-val income num" style="color:${n.availableToSpend>=0?'var(--income)':'var(--expense)'}">${gbp(n.availableToSpend)}</div><div class="kpi-sub">Balance minus bills due minus wishlist</div></div>
     </div>
 
-    <div class="grid-2">
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title">Upcoming<small>What's expected to hit your account soon</small></div>
+        <div class="seg" id="upcoming-seg">
+          <button data-d="30" class="${UI.upcomingDays===30?'active':''}">30 days</button>
+          <button data-d="60" class="${UI.upcomingDays===60?'active':''}">60 days</button>
+        </div>
+      </div>
+      <div id="upcoming-list"></div>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px;">
       <div class="panel">
         <div class="panel-head"><div class="panel-title">Detected recurring<small>Auto-spotted from your transaction history — dismiss anything that's wrong</small></div></div>
         <div class="recurring-grid">
@@ -1465,6 +1607,12 @@ function renderPlan(c){
     </div>
   `;
 
+  renderUpcoming(n);
+  document.getElementById('upcoming-seg').addEventListener('click', e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    UI.upcomingDays = parseInt(b.dataset.d);
+    renderPlan(c);
+  });
   renderRecurringLists(n);
   renderWishlist(n);
 
@@ -1494,6 +1642,51 @@ function renderPlan(c){
   };
 }
 
+function upcomingBillsFor(n, days){
+  const horizon = addDays(todayISO(), days);
+  const combined = [...n.recurringIncome, ...n.recurringExpense];
+  const dated = combined
+    .filter(r=> !r.manual && r.nextExpected <= horizon)
+    .sort((a,b)=> a.nextExpected.localeCompare(b.nextExpected));
+  const undated = combined.filter(r=> r.manual && !r.noHistory && r.stillDue);
+  return { dated, undated };
+}
+function daysUntilLabel(dateStr){
+  const d = daysBetween(todayISO(), dateStr);
+  if(d<0) return `${Math.abs(d)}d overdue`;
+  if(d===0) return 'today';
+  if(d===1) return 'tomorrow';
+  return `in ${d} days`;
+}
+function renderUpcoming(n){
+  const host = document.getElementById('upcoming-list');
+  if(!host) return;
+  const { dated, undated } = upcomingBillsFor(n, UI.upcomingDays);
+  if(!dated.length && !undated.length){
+    host.innerHTML = `<div class="empty-state" style="padding:24px 10px;"><h4>Nothing expected soon</h4><p style="font-size:12.5px;">Once bills or income are detected as regular, they'll show up here ahead of time.</p></div>`;
+    return;
+  }
+  let html = '';
+  if(dated.length){
+    html += dated.map(r=> `<div class="upcoming-row">
+      <div class="upcoming-date">
+        <div class="upcoming-day">${ukDateShort(r.nextExpected)}</div>
+        <div class="upcoming-rel">${daysUntilLabel(r.nextExpected)}</div>
+      </div>
+      <div class="upcoming-desc">${escHTML(r.description)}</div>
+      <div class="upcoming-amt num" style="color:${r.amount>0?'var(--income)':'var(--ink)'}">${gbp(r.amount,{signed:true})}</div>
+    </div>`).join('');
+  }
+  if(undated.length){
+    html += `<div class="upcoming-subhead">Expected this month · no fixed date</div>`;
+    html += undated.map(r=> `<div class="upcoming-row">
+      <div class="upcoming-date"><div class="upcoming-day">—</div></div>
+      <div class="upcoming-desc">${escHTML(r.description)} <span class="stamp-mini">est.</span></div>
+      <div class="upcoming-amt num" style="color:${r.amount>0?'var(--income)':'var(--ink)'}">${gbp(r.amount,{signed:true})}</div>
+    </div>`).join('');
+  }
+  host.innerHTML = html;
+}
 function renderRecurringLists(n){
   const incomeHost = document.getElementById('recurring-income');
   const expenseHost = document.getElementById('recurring-expense');
@@ -1685,6 +1878,7 @@ function renderCatList(){
       cats.map(cat=>{
         const used = DB.transactions.filter(t=>t.category===cat.name).length;
         const isRegular = DB.regularCategories.includes(cat.name);
+        const budget = DB.budgets[cat.name];
         return `<div class="cat-list-row">
           <span class="stamp ${kind==='income'?'c-income':'c-expense'}">${escHTML(cat.name)}</span>
           <span class="nm"></span>
@@ -1692,11 +1886,24 @@ function renderCatList(){
           <label class="regular-toggle" title="Estimate this category as a regular monthly ${kind==='income'?'income':'cost'} in Spending Plan, from your recent history — useful when the transactions vary in amount or description, like a credit card bill.">
             <input type="checkbox" data-action="toggle-regular" data-name="${escAttr(cat.name)}" ${isRegular?'checked':''}> Regular
           </label>
+          ${kind==='expense' ? `<label class="budget-input-wrap" title="Set a monthly budget for this category — shown as a progress bar on your dashboard.">
+            Budget £<input type="number" min="0" step="1" class="budget-input" data-name="${escAttr(cat.name)}" value="${budget!=null?budget:''}" placeholder="—">/mo
+          </label>` : ''}
           <button class="row-icon-btn" data-action="del-cat" data-name="${escAttr(cat.name)}" title="Delete">${iconTrash()}</button>
         </div>`;
       }).join('') + `</div>`;
   }).join('');
   host.querySelectorAll('[data-action="del-cat"]').forEach(b=> b.onclick = ()=> deleteCategory(b.dataset.name));
+  host.querySelectorAll('.budget-input').forEach(inp=>{
+    inp.addEventListener('change', (e)=>{
+      const name = e.target.dataset.name;
+      const v = parseFloat(e.target.value);
+      if(isNaN(v) || v<=0){ delete DB.budgets[name]; e.target.value=''; }
+      else DB.budgets[name] = v;
+      scheduleSave();
+      toast(isNaN(v)||v<=0 ? `Budget removed for ${name}` : `Budget for ${name} set to ${gbp(v)}/mo`);
+    });
+  });
   host.querySelectorAll('[data-action="toggle-regular"]').forEach(cb=>{
     cb.onchange = (e)=>{
       const name = e.target.dataset.name;
@@ -1739,6 +1946,7 @@ function deleteCategory(name){
     DB.transactions.forEach(t=>{ if(t.category===name) t.category=''; });
     DB.rules = DB.rules.filter(r=>r.category!==name);
     DB.regularCategories = DB.regularCategories.filter(n=>n!==name);
+    delete DB.budgets[name];
     scheduleSave(); closeModal(); renderContent(); toast('Category deleted');
   };
 }
@@ -2277,6 +2485,7 @@ function handleRestoreFile(file){
       wishlist: Array.isArray(parsed.wishlist) ? parsed.wishlist : [],
       dismissedRecurring: Array.isArray(parsed.dismissedRecurring) ? parsed.dismissedRecurring : [],
       regularCategories: Array.isArray(parsed.regularCategories) ? parsed.regularCategories : [],
+      budgets: (parsed.budgets && typeof parsed.budgets==='object') ? parsed.budgets : {},
     };
     const currentCount = DB.transactions.length;
     openModal(`
@@ -2322,6 +2531,7 @@ async function init(){
   if(!DB.wishlist) DB.wishlist = [];
   if(!DB.dismissedRecurring) DB.dismissedRecurring = [];
   if(!DB.regularCategories) DB.regularCategories = [];
+  if(!DB.budgets) DB.budgets = {};
   if(!loaded) scheduleSave();
 
   document.getElementById('nav').addEventListener('click', (e)=>{
