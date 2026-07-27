@@ -1694,6 +1694,7 @@ function renderTxBody(){
   body.querySelectorAll('[data-action="edit-tx"]').forEach(b=> b.onclick = ()=> openTxModal(b.dataset.id));
   body.querySelectorAll('[data-action="delete-tx"]').forEach(b=> b.onclick = ()=> deleteTx(b.dataset.id));
   body.querySelectorAll('[data-action="convert-transfer"]').forEach(b=> b.onclick = ()=> openConvertToTransferModal(b.dataset.id));
+  body.querySelectorAll('[data-action="revert-transfer"]').forEach(b=> b.onclick = ()=> revertTransfer(b.dataset.id));
 }
 function rowHTML_tx(t){
   const checked = UI.txSelected.has(t.id) ? 'checked' : '';
@@ -1706,6 +1707,7 @@ function rowHTML_tx(t){
       <td>${escHTML(t.account||'—')}</td>
       <td class="amt ${t.amount>0?'income':''}">${gbp(t.amount,{signed:true})}</td>
       <td class="row-actions">
+        <button class="row-icon-btn" data-action="revert-transfer" data-id="${t.id}" title="Remove transfer tag and revert to a normal transaction">${iconUndo()}</button>
         <button class="row-icon-btn" data-action="delete-tx" data-id="${t.id}" title="Delete both sides of this transfer">${iconTrash()}</button>
       </td>
     </tr>`;
@@ -1725,6 +1727,7 @@ function rowHTML_tx(t){
   </tr>`;
 }
 function iconSwap(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>`; }
+function iconUndo(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-9.36L1 10"/></svg>`; }
 function iconEdit(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>`; }
 function iconTrash(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>`; }
 
@@ -1773,6 +1776,7 @@ function openConvertToTransferModal(id){
     if(otherAccount === t.account){ toast('That\u2019s the same account this transaction is already on', 'error'); return; }
     const tid = uid('xfer');
     t.transferId = tid;
+    t.preTransferCategory = t.category;
     t.category = '';
     DB.transactions.push({
       id: uid('tx'), date: t.date, amount: -t.amount,
@@ -1781,6 +1785,30 @@ function openConvertToTransferModal(id){
     });
     scheduleSave(); closeModal(); renderContent();
     toast('Converted to a transfer');
+  };
+}
+function revertTransfer(id){
+  const t = DB.transactions.find(x=>x.id===id);
+  if(!t || !t.transferId) return;
+  const pair = DB.transactions.find(x=> x.transferId===t.transferId && x.id!==t.id);
+  const hadOriginalCategory = t.preTransferCategory !== undefined;
+  openModal(`
+    <div class="modal-head"><h3>Remove transfer tag?</h3></div>
+    <div class="modal-body">
+      <p style="margin:0 0 4px;">${escHTML(t.description)}</p>
+      <p style="color:var(--ink-soft); font-size:13px; margin:0 0 12px;">${ukDate(t.date)} · ${escHTML(t.account||'—')} · ${gbp(t.amount,{signed:true})}</p>
+      <p style="color:var(--ink-soft); font-size:13px; margin:0;">This one will go back to being a normal ${t.amount>0?'income':'expense'} transaction${hadOriginalCategory && t.preTransferCategory ? `, restored to its original category (<strong>${escHTML(t.preTransferCategory)}</strong>)` : ''}.</p>
+      ${pair ? `<p style="color:var(--ink-soft); font-size:13px; margin:8px 0 0;">The matching entry on <strong>${escHTML(pair.account)}</strong> (${gbp(pair.amount,{signed:true})}) will be deleted, since it only existed to make the transfer balance.</p>` : ''}
+    </div>
+    <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-confirm">Remove transfer tag</button></div>
+  `);
+  document.getElementById('m-cancel').onclick = closeModal;
+  document.getElementById('m-confirm').onclick = ()=>{
+    if(pair) DB.transactions = DB.transactions.filter(x=> x.id!==pair.id);
+    delete t.transferId;
+    if(hadOriginalCategory){ t.category = t.preTransferCategory; delete t.preTransferCategory; }
+    scheduleSave(); closeModal(); renderContent();
+    toast('Transfer tag removed');
   };
 }
 

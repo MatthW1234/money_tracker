@@ -7,7 +7,8 @@ merging for near-duplicate names), budgets with progress bars, month-vs-month
 comparisons, a transactions log with bulk editing (search or filter, select
 several, then set their account or category in one go), proper transfers
 between your own accounts — either recorded directly or converted from an
-existing transaction — so moving money from savings to current doesn't get
+existing transaction, with a one-click revert if it's tagged as a transfer
+by mistake — so moving money from savings to current doesn't get
 counted as income or spending, an "exclude from totals" option for real
 money that hits your account but isn't really yours to spend (e.g. an
 earmarked payment from a parent), bank statement (CSV) import with category
