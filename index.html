@@ -860,6 +860,7 @@ const UI = {
   upcomingDays: 30,
   dashboardYearOffset: 0,
   trendGran: 'month',
+  balanceGran: 'month',
   txSort: {col:'date', dir:'desc'},
   txFilters: {search:'', category:'all', type:'all', from:'', to:''},
   charts: {},
@@ -975,7 +976,19 @@ function renderDashboard(c){
       <div class="kpi-card balance"><div class="stripe"></div><div class="kpi-lbl">Current balance</div><div class="kpi-val num" style="color:var(--gold)">${gbp(balance)}</div><div class="kpi-sub">Starting balance + all-time activity</div></div>
     </div>
 
-    <div class="grid-2">
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title">Balance over time<small>Your actual balance trajectory, not just flow in vs out</small></div>
+        <div class="seg" id="balance-seg">
+          <button data-g="week" class="${UI.balanceGran==='week'?'active':''}">Weekly</button>
+          <button data-g="month" class="${UI.balanceGran==='month'?'active':''}">Monthly</button>
+          <button data-g="year" class="${UI.balanceGran==='year'?'active':''}">Yearly</button>
+        </div>
+      </div>
+      <div class="chart-wrap"><canvas id="balance-chart"></canvas></div>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px;">
       <div class="panel">
         <div class="panel-head">
           <div class="panel-title">Trend<small>Income vs expenses over time</small></div>
@@ -1064,7 +1077,15 @@ function renderDashboard(c){
   };
   document.getElementById('trend-seg').addEventListener('click', e=>{
     const b = e.target.closest('button'); if(!b) return;
-    UI.trendGran = b.dataset.g; drawTrendChart();
+    UI.trendGran = b.dataset.g;
+    document.querySelectorAll('#trend-seg button').forEach(x=> x.classList.toggle('active', x===b));
+    drawTrendChart();
+  });
+  document.getElementById('balance-seg').addEventListener('click', e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    UI.balanceGran = b.dataset.g;
+    document.querySelectorAll('#balance-seg button').forEach(x=> x.classList.toggle('active', x===b));
+    drawBalanceChart();
   });
   document.getElementById('view-all-tx').onclick = ()=> { document.querySelector('[data-tab="transactions"]').click(); };
 
@@ -1074,6 +1095,7 @@ function renderDashboard(c){
     `<tr class="empty-row"><td colspan="4">No transactions in this period yet.</td></tr>`;
 
   drawTrendChart();
+  drawBalanceChart();
   drawCategoryChart(list);
   drawYTDChart();
   renderMovers(list);
@@ -1164,17 +1186,18 @@ function rowHTML_recent(t){
   </tr>`;
 }
 
-function trendBuckets(){
+function trendBuckets(gran){
+  gran = gran || UI.trendGran;
   const now = todayISO();
   const buckets = [];
-  if(UI.trendGran==='week'){
+  if(gran==='week'){
     let start = mondayOf(now);
     for(let i=11;i>=0;i--){
       const from = addDays(start, -7*i);
       const to = addDays(from, 6);
       buckets.push({from, to, label: ukDateShort(from)});
     }
-  } else if(UI.trendGran==='month'){
+  } else if(gran==='month'){
     for(let i=11;i>=0;i--){
       const from = addMonths(now.slice(0,8)+'01', -i).slice(0,7)+'-01';
       const d = new Date(from+'T00:00:00');
@@ -1191,6 +1214,37 @@ function trendBuckets(){
   return buckets;
 }
 
+function balanceAt(dateISO){
+  return DB.startingBalance + DB.transactions.reduce((s,t)=> t.date<=dateISO ? s+t.amount : s, 0);
+}
+function drawBalanceChart(){
+  const buckets = trendBuckets(UI.balanceGran);
+  const data = buckets.map(b=> balanceAt(b.to));
+  const ctx = document.getElementById('balance-chart');
+  if(!ctx) return;
+  if(UI.charts.balance) UI.charts.balance.destroy();
+  UI.charts.balance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: buckets.map(b=>b.label),
+      datasets: [{
+        label: 'Balance', data, tension:.3, fill:true, borderWidth:2.5, pointRadius:2,
+        borderColor: '#0B6E4F', backgroundColor: 'rgba(11,110,79,.08)',
+        segment: {
+          borderColor: (c)=> (c.p0.parsed.y<0 || c.p1.parsed.y<0) ? '#B3392E' : '#0B6E4F',
+        },
+      }]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index', intersect:false},
+      plugins:{ legend:{display:false},
+        tooltip:{callbacks:{label:(ctx)=> ` Balance: ${gbp(ctx.parsed.y)}`}} },
+      scales:{ y:{ ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}}, grid:{color:'#E7EBE3'} },
+                x:{ grid:{display:false}, ticks:{font:{size:11}} } }
+    }
+  });
+}
 function drawTrendChart(){
   const buckets = trendBuckets();
   const incomeData = buckets.map(b=> sumIncome(txInRange(b.from,b.to)));
