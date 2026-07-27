@@ -783,17 +783,55 @@ function topMerchants(list, limit){
 }
 
 /* ---------- recurring transaction detection ---------- */
+// UK bank statements pad the real merchant name with boilerplate on either
+// side — a payment-type prefix ("CARD PAYMENT TO", "DIRECT DEBIT PAYMENT
+// TO"...) and often a per-transaction reference/order code suffix ("AMAZON
+// PRIME*KJ66U0E55" — a different code every time). Both get stripped before
+// the merchant name itself is extracted, so the same merchant groups
+// together correctly across transactions.
+const DESC_NOISE_PREFIXES = [
+  'THIRD PARTY PAYMENT MADE VIA FASTER PAYMENT TO', 'THIRD PARTY PAYMENT MADE VIA FASTER PAYMENT FROM',
+  'BILL PAYMENT VIA FASTER PAYMENT TO', 'BILL PAYMENT VIA FASTER PAYMENT FROM',
+  'DIRECT DEBIT PAYMENT TO', 'REGULAR TRANSFER PAYMENT TO',
+  'FASTER PAYMENTS RECEIPT REF.', 'FASTER PAYMENT RECEIPT REF.',
+  'FASTER PAYMENTS RECEIPT', 'FASTER PAYMENT RECEIPT',
+  'CONTACTLESS PAYMENT TO', 'DEBIT CARD PAYMENT TO',
+  'ONLINE PAYMENT TO', 'STANDING ORDER TO', 'STANDING ORDER',
+  'DIRECT DEBIT TO', 'DIRECT DEBIT',
+  'THIRD PARTY PAYMENT TO', 'THIRD PARTY PAYMENT',
+  'BILL PAYMENT TO', 'BILL PAYMENT FROM', 'BILL PAYMENT VIA', 'BILL PAYMENT',
+  'BANK GIRO CREDIT REF', 'BANK GIRO CREDIT',
+  'CASH WITHDRAWAL AT', 'CASH WITHDRAWAL', 'ATM WITHDRAWAL AT', 'ATM WITHDRAWAL',
+  'CARD PAYMENT TO', 'CARD PAYMENT',
+  'TRANSFER TO', 'TRANSFER FROM', 'PAYMENT TO', 'PAYMENT FROM',
+].sort((a,b)=> b.length-a.length);
+const DESC_NOISE_PHRASES = ['GOOGLE PAY','APPLE PAY','SAMSUNG PAY'];
+const DESC_STOP_WORDS = new Set(['REF','REFERENCE','MANDATE','GBP','RATE','ON','VIA','MADE','FROM','TO','AT','NO']);
+
+function stripDescPrefix(s){
+  let changed = true, iterations = 0;
+  while(changed && iterations<3){
+    changed = false;
+    for(const p of DESC_NOISE_PREFIXES){
+      if(s.startsWith(p)){ s = s.slice(p.length).trim(); changed = true; break; }
+    }
+    iterations++;
+  }
+  return s;
+}
 function normalizeDescForRecurring(desc){
-  return String(desc||'')
-    .toUpperCase()
-    .replace(/[0-9]/g,' ')       // strip reference numbers / embedded dates
-    .replace(/[^A-Z ]/g,' ')     // strip punctuation
-    .replace(/\s+/g,' ')
-    .trim()
-    .split(' ')
-    .filter(Boolean)
-    .slice(0,3)                  // first 3 significant words is usually the merchant/payee
-    .join(' ');
+  let s = String(desc||'').toUpperCase().trim();
+  s = stripDescPrefix(s);
+  // "AMAZON PRIME*KJ66U0E55" / "UBER *TRIP HELP.UBER.C" — everything from the
+  // first * onwards is almost always a per-transaction code, not the merchant.
+  const starIdx = s.indexOf('*');
+  if(starIdx > 0) s = s.slice(0, starIdx).trim();
+  DESC_NOISE_PHRASES.forEach(p=>{ s = s.split(p).join(' '); });
+  s = s.replace(/[0-9]/g,' ').replace(/[^A-Z ]/g,' ').replace(/\s+/g,' ').trim();
+  const words = s.split(' ').filter(w=> w && !DESC_STOP_WORDS.has(w));
+  const deduped = words.filter((w,i)=> words.indexOf(w)===i);
+  const result = deduped.slice(0,2).join(' ');
+  return result || s.split(' ').filter(Boolean).slice(0,2).join(' ');
 }
 function daysBetween(a,b){
   return Math.round((new Date(b+'T00:00:00') - new Date(a+'T00:00:00')) / 86400000);
