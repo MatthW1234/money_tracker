@@ -369,6 +369,26 @@ textarea{ resize:vertical; min-height:60px; }
 .qc-line.qc-total{ border-top:1px solid var(--line); margin-top:4px; padding-top:9px; font-weight:700; font-size:13.5px; color:var(--ink); }
 .qc-line.qc-total .num{ font-size:15px; }
 
+/* ---------- Accounts ---------- */
+.account-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; }
+.account-card{ background:var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+.account-card.unassigned{ border-style:dashed; }
+.account-name{ font-size:11.5px; font-weight:600; color:var(--ink-soft); }
+.account-balance{ font-size:19px; font-weight:600; margin-top:4px; }
+.account-sub{ font-size:10.5px; color:var(--ink-faint); margin-top:2px; }
+
+/* ---------- Top merchants ---------- */
+.merchant-rows{ display:flex; flex-direction:column; gap:10px; }
+.merchant-row{ display:flex; align-items:center; gap:12px; }
+.merchant-rank{ width:20px; height:20px; border-radius:50%; background:var(--surface-2); color:var(--ink-faint); font-size:10.5px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.merchant-mid{ flex:1; min-width:0; }
+.merchant-top{ display:flex; justify-content:space-between; gap:10px; margin-bottom:4px; }
+.merchant-name{ font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.merchant-amt{ font-size:12.5px; font-weight:600; flex-shrink:0; }
+.merchant-bar-track{ height:6px; border-radius:20px; background:var(--surface-2); border:1px solid var(--line); overflow:hidden; }
+.merchant-bar-fill{ height:100%; border-radius:20px; background:var(--brand); }
+.merchant-count{ font-size:11px; color:var(--ink-faint); font-family:var(--font-mono); flex-shrink:0; width:28px; text-align:right; }
+
 /* ---------- Budgets ---------- */
 .budget-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; }
 .budget-row-top{ display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; }
@@ -592,6 +612,7 @@ function buildSeedDB(){
     dismissedRecurring: [],
     regularCategories: ['Credit Card Payment'],
     budgets: { 'Groceries':400, 'Dining Out':150, 'Entertainment':100, 'Transport':120, 'Subscriptions':80 },
+    accountStartingBalances: { 'Savings': 300 },
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -606,6 +627,7 @@ function buildEmptyDB(){
     dismissedRecurring: [],
     regularCategories: [],
     budgets: {},
+    accountStartingBalances: {},
   };
 }
 
@@ -728,6 +750,36 @@ function sumIncome(list){ return list.reduce((s,t)=> t.amount>0 ? s+t.amount : s
 function sumExpense(list){ return list.reduce((s,t)=> t.amount<0 ? s+Math.abs(t.amount) : s, 0); }
 function currentBalance(){
   return DB.startingBalance + DB.transactions.reduce((s,t)=> s+t.amount, 0);
+}
+function perAccountBalances(){
+  const accounts = new Set(Object.keys(DB.accountStartingBalances));
+  DB.transactions.forEach(t=>{ if(t.account) accounts.add(t.account); });
+  const rows = [...accounts].map(account=>{
+    const list = DB.transactions.filter(t=> t.account===account);
+    const start = DB.accountStartingBalances[account] || 0;
+    const balance = start + list.reduce((s,t)=> s+t.amount, 0);
+    return { account, balance, count: list.length };
+  });
+  const unassigned = DB.transactions.filter(t=> !t.account);
+  if(unassigned.length){
+    rows.push({ account:'Unassigned', balance: unassigned.reduce((s,t)=>s+t.amount,0), count: unassigned.length, unassigned:true });
+  }
+  return rows.sort((a,b)=> b.balance-a.balance);
+}
+function topMerchants(list, limit){
+  limit = limit || 8;
+  const byMerchant = {};
+  list.forEach(t=>{
+    if(t.amount>=0) return;
+    const key = normalizeDescForRecurring(t.description) || t.description.trim().toUpperCase() || 'Unknown';
+    byMerchant[key] = byMerchant[key] || {total:0, count:0};
+    byMerchant[key].total += Math.abs(t.amount);
+    byMerchant[key].count += 1;
+  });
+  return Object.entries(byMerchant)
+    .map(([name,v])=> ({name, ...v}))
+    .sort((a,b)=> b.total-a.total)
+    .slice(0, limit);
 }
 
 /* ---------- recurring transaction detection ---------- */
@@ -942,6 +994,9 @@ function renderDashboard(c){
   const budgetEntries = Object.entries(DB.budgets);
   const showBudgets = UI.dashboardPeriod==='month' && budgetEntries.length>0;
 
+  const accountRows = perAccountBalances();
+  const merchants = topMerchants(list, 8);
+
   const prevRange = previousPeriodRange(UI.dashboardPeriod);
   const showCompare = !!prevRange;
   let prevList = [], prevIncome=0, prevExpense=0;
@@ -976,6 +1031,20 @@ function renderDashboard(c){
       <div class="kpi-card balance"><div class="stripe"></div><div class="kpi-lbl">Current balance</div><div class="kpi-val num" style="color:var(--gold)">${gbp(balance)}</div><div class="kpi-sub">Starting balance + all-time activity</div></div>
     </div>
 
+    ${accountRows.length ? `
+    <div class="panel">
+      <div class="panel-head"><div class="panel-title">Accounts<small>Set a starting balance per account in Settings to match your real bank balances</small></div></div>
+      <div class="account-grid">
+        ${accountRows.map(a=> `
+          <div class="account-card ${a.unassigned?'unassigned':''}">
+            <div class="account-name">${escHTML(a.account)}</div>
+            <div class="account-balance num" style="color:${a.balance>=0?'var(--gold)':'var(--expense)'}">${gbp(a.balance)}</div>
+            <div class="account-sub">${a.count} transaction${a.count===1?'':'s'}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>` : ''}
+
     <div class="panel">
       <div class="panel-head">
         <div class="panel-title">Balance over time<small>Your actual balance trajectory, not just flow in vs out</small></div>
@@ -1005,6 +1074,11 @@ function renderDashboard(c){
         <div class="chart-wrap donut"><canvas id="cat-chart"></canvas></div>
         <div class="legend-list" id="cat-legend"></div>
       </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px;">
+      <div class="panel-head"><div class="panel-title">Top merchants<small>${range.label} · who you spent the most with, not just which category</small></div></div>
+      <div id="merchants-list"></div>
     </div>
 
     <div class="grid-2" style="margin-top:16px;">
@@ -1099,6 +1173,7 @@ function renderDashboard(c){
   drawCategoryChart(list);
   drawYTDChart();
   renderMovers(list);
+  renderMerchants(merchants);
   if(showBudgets) renderBudgets(list, budgetEntries);
   if(showCompare) renderCompareTable(list, prevList);
 }
@@ -1113,6 +1188,25 @@ function compareStatHTML(label, current, previous, higherIsGood){
     <div class="compare-stat-val num">${gbp(current)}</div>
     <div class="compare-stat-delta" style="color:${deltaColor}">${delta>=0?'▲':'▼'} ${gbp(Math.abs(delta))} (${pctLabel})</div>
   </div>`;
+}
+function renderMerchants(merchants){
+  const host = document.getElementById('merchants-list');
+  if(!host) return;
+  if(!merchants.length){
+    host.innerHTML = `<div class="empty-state" style="padding:20px 10px;"><p style="font-size:12.5px;">No spending in this period to rank yet.</p></div>`;
+    return;
+  }
+  const max = merchants[0].total;
+  host.innerHTML = `<div class="merchant-rows">${merchants.map((m,i)=>`
+    <div class="merchant-row">
+      <span class="merchant-rank">${i+1}</span>
+      <div class="merchant-mid">
+        <div class="merchant-top"><span class="merchant-name">${escHTML(m.name)}</span><span class="merchant-amt num">${gbp(m.total)}</span></div>
+        <div class="merchant-bar-track"><div class="merchant-bar-fill" style="width:${max? Math.round(m.total/max*100):0}%;"></div></div>
+      </div>
+      <span class="merchant-count">${m.count}×</span>
+    </div>
+  `).join('')}</div>`;
 }
 function renderBudgets(list, budgetEntries){
   const host = document.getElementById('budget-list');
@@ -2464,6 +2558,9 @@ function renderImportStep4(body){
    SETTINGS / BACKUP
    ========================================================= */
 function openSettingsModal(){
+  const accounts = new Set(Object.keys(DB.accountStartingBalances));
+  DB.transactions.forEach(t=>{ if(t.account) accounts.add(t.account); });
+  const accountRows = [...accounts].sort();
   openModal(`
     <div class="modal-head"><h3>Settings</h3></div>
     <div class="modal-body">
@@ -2471,6 +2568,17 @@ function openSettingsModal(){
         <label>Starting balance (£)</label>
         <input type="number" step="0.01" id="s-balance" value="${DB.startingBalance}">
       </div>
+      ${accountRows.length ? `
+      <div style="border-top:1px solid var(--line); padding-top:14px; margin-bottom:14px;">
+        <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Per-account starting balances (optional)</div>
+        <div style="font-size:11.5px;color:var(--ink-faint);margin-bottom:10px;">Leave blank to just total each account's own transactions. Set one to make the Accounts panel match your real bank balance.</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${accountRows.map(a=> `<label class="budget-input-wrap" style="justify-content:space-between;">
+            <span>${escHTML(a)}</span>
+            <span>£<input type="number" step="0.01" class="account-balance-input" data-name="${escAttr(a)}" value="${DB.accountStartingBalances[a]!=null?DB.accountStartingBalances[a]:''}" placeholder="0.00" style="width:80px;"></span>
+          </label>`).join('')}
+        </div>
+      </div>` : ''}
       <div style="border-top:1px solid var(--line); padding-top:16px; display:flex; flex-direction:column; gap:8px;">
         <button class="btn" id="s-restore">Restore from backup…</button>
         <input type="file" id="s-restore-file" accept=".json,application/json" class="hidden">
@@ -2481,6 +2589,15 @@ function openSettingsModal(){
     </div>
     <div class="modal-foot"><button class="btn" id="m-cancel">Close</button><button class="btn btn-primary" id="m-save">Save</button></div>
   `);
+  document.querySelectorAll('.account-balance-input').forEach(inp=>{
+    inp.addEventListener('change', (e)=>{
+      const name = e.target.dataset.name;
+      const v = parseFloat(e.target.value);
+      if(isNaN(v)){ delete DB.accountStartingBalances[name]; e.target.value=''; }
+      else DB.accountStartingBalances[name] = v;
+      scheduleSave();
+    });
+  });
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('m-save').onclick = ()=>{
     const v = parseFloat(document.getElementById('s-balance').value);
@@ -2540,6 +2657,7 @@ function handleRestoreFile(file){
       dismissedRecurring: Array.isArray(parsed.dismissedRecurring) ? parsed.dismissedRecurring : [],
       regularCategories: Array.isArray(parsed.regularCategories) ? parsed.regularCategories : [],
       budgets: (parsed.budgets && typeof parsed.budgets==='object') ? parsed.budgets : {},
+      accountStartingBalances: (parsed.accountStartingBalances && typeof parsed.accountStartingBalances==='object') ? parsed.accountStartingBalances : {},
     };
     const currentCount = DB.transactions.length;
     openModal(`
@@ -2586,6 +2704,7 @@ async function init(){
   if(!DB.dismissedRecurring) DB.dismissedRecurring = [];
   if(!DB.regularCategories) DB.regularCategories = [];
   if(!DB.budgets) DB.budgets = {};
+  if(!DB.accountStartingBalances) DB.accountStartingBalances = {};
   if(!loaded) scheduleSave();
 
   document.getElementById('nav').addEventListener('click', (e)=>{
