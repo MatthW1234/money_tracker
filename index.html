@@ -234,6 +234,9 @@ a{ color:inherit; }
 .stamp.c-income{ color:var(--income); background:var(--income-wash); }
 .stamp.c-expense{ color:var(--expense); background:var(--expense-wash); }
 .stamp.c-none{ color:var(--ink-faint); background:var(--surface-2); border-style:dashed; }
+.stamp.c-transfer{ color:var(--gold); background:var(--gold-wash); }
+tr.transfer-row{ background:var(--surface-2); }
+tr.transfer-row:hover{ background:var(--gold-wash); }
 
 /* ---------- Table ---------- */
 .table-wrap{ overflow:auto; border:1px solid var(--line); border-radius:var(--radius); background:var(--surface); }
@@ -748,8 +751,8 @@ function suggestCategory(description){
 function txInRange(from, to){
   return DB.transactions.filter(t=> t.date >= from && t.date <= to);
 }
-function sumIncome(list){ return list.reduce((s,t)=> t.amount>0 ? s+t.amount : s, 0); }
-function sumExpense(list){ return list.reduce((s,t)=> t.amount<0 ? s+Math.abs(t.amount) : s, 0); }
+function sumIncome(list){ return list.reduce((s,t)=> (t.amount>0 && !t.transferId) ? s+t.amount : s, 0); }
+function sumExpense(list){ return list.reduce((s,t)=> (t.amount<0 && !t.transferId) ? s+Math.abs(t.amount) : s, 0); }
 function currentBalance(){
   return DB.startingBalance + DB.transactions.reduce((s,t)=> s+t.amount, 0);
 }
@@ -775,7 +778,7 @@ function topMerchants(list, limit){
   limit = limit || 8;
   const byMerchant = {};
   list.forEach(t=>{
-    if(t.amount>=0) return;
+    if(t.amount>=0 || t.transferId) return;
     const rawKey = merchantKeyFor(t.description);
     const key = DB.merchantAliases[rawKey] || rawKey;
     byMerchant[key] = byMerchant[key] || {total:0, count:0, rawKeys:new Set()};
@@ -791,7 +794,7 @@ function topMerchants(list, limit){
 function allKnownMerchantNames(){
   const names = new Set();
   DB.transactions.forEach(t=>{
-    if(t.amount>=0) return;
+    if(t.amount>=0 || t.transferId) return;
     let key = merchantKeyFor(t.description);
     if(DB.merchantAliases[key]) key = DB.merchantAliases[key];
     names.add(key);
@@ -857,6 +860,7 @@ function recurringKey(descKey, amount){ return descKey+'|'+Math.round(amount); }
 function detectRecurring(){
   const byDesc = {};
   DB.transactions.forEach(t=>{
+    if(t.transferId) return;
     const key = normalizeDescForRecurring(t.description);
     if(!key) return;
     (byDesc[key] = byDesc[key] || []).push(t);
@@ -969,6 +973,7 @@ const UI = {
   trendGran: 'month',
   balanceGran: 'month',
   txSort: {col:'date', dir:'desc'},
+  txSelected: new Set(),
   txFilters: {search:'', category:'all', type:'all', from:'', to:''},
   charts: {},
   importState: null,
@@ -997,7 +1002,7 @@ function setTab(tab){
    ========================================================= */
 function renderSidebarBits(){
   document.getElementById('sidebar-balance').textContent = gbp(currentBalance());
-  const uncat = DB.transactions.filter(t=>!t.category).length;
+  const uncat = DB.transactions.filter(t=>!t.category && !t.transferId).length;
   const badge = document.getElementById('uncat-badge');
   if(uncat>0){ badge.textContent = uncat; badge.classList.remove('hidden'); }
   else{ badge.classList.add('hidden'); }
@@ -1080,8 +1085,8 @@ function renderDashboard(c){
     </div>
 
     <div class="kpi-row">
-      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Income</div><div class="kpi-val income num">${gbp(income)}</div><div class="kpi-sub">${list.filter(t=>t.amount>0).length} transactions</div></div>
-      <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Expenses</div><div class="kpi-val expense num">${gbp(expense)}</div><div class="kpi-sub">${list.filter(t=>t.amount<0).length} transactions</div></div>
+      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Income</div><div class="kpi-val income num">${gbp(income)}</div><div class="kpi-sub">${list.filter(t=>t.amount>0 && !t.transferId).length} transactions</div></div>
+      <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Expenses</div><div class="kpi-val expense num">${gbp(expense)}</div><div class="kpi-sub">${list.filter(t=>t.amount<0 && !t.transferId).length} transactions</div></div>
       <div class="kpi-card net"><div class="stripe"></div><div class="kpi-lbl">Net</div><div class="kpi-val num" style="color:${net>=0?'var(--brand)':'var(--expense)'}">${net>=0?'+':''}${gbp(net)}</div><div class="kpi-sub">Income minus expenses</div></div>
       <div class="kpi-card balance"><div class="stripe"></div><div class="kpi-lbl">Current balance</div><div class="kpi-val num" style="color:var(--gold)">${gbp(balance)}</div><div class="kpi-sub">Starting balance + all-time activity</div></div>
     </div>
@@ -1300,7 +1305,7 @@ function renderBudgets(list, budgetEntries){
   const host = document.getElementById('budget-list');
   if(!host) return;
   const rows = budgetEntries.map(([catName, limit])=>{
-    const spent = list.filter(t=> t.category===catName && t.amount<0).reduce((s,t)=> s+Math.abs(t.amount), 0);
+    const spent = list.filter(t=> t.category===catName && t.amount<0 && !t.transferId).reduce((s,t)=> s+Math.abs(t.amount), 0);
     const pct = limit>0 ? Math.min(999, Math.round(spent/limit*100)) : 0;
     const color = pct>=100 ? 'var(--expense)' : (pct>=80 ? 'var(--gold)' : 'var(--income)');
     return `<div class="budget-row">
@@ -1318,8 +1323,8 @@ function renderCompareTable(list, prevList){
   const host = document.getElementById('compare-table');
   if(!host) return;
   const byCat = {};
-  list.forEach(t=>{ if(t.amount<0){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].cur+=Math.abs(t.amount); } });
-  prevList.forEach(t=>{ if(t.amount<0){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].prev+=Math.abs(t.amount); } });
+  list.forEach(t=>{ if(t.amount<0 && !t.transferId){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].cur+=Math.abs(t.amount); } });
+  prevList.forEach(t=>{ if(t.amount<0 && !t.transferId){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].prev+=Math.abs(t.amount); } });
   const rows = Object.entries(byCat)
     .map(([name,v])=> ({name, ...v, delta:v.cur-v.prev}))
     .sort((a,b)=> Math.abs(b.delta)-Math.abs(a.delta))
@@ -1340,8 +1345,8 @@ function renderCompareTable(list, prevList){
     }).join('')}</tbody></table></div>`;
 }
 function renderMovers(list){
-  const income = list.filter(t=>t.amount>0).sort((a,b)=>b.amount-a.amount).slice(0,5);
-  const expense = list.filter(t=>t.amount<0).sort((a,b)=>a.amount-b.amount).slice(0,5);
+  const income = list.filter(t=>t.amount>0 && !t.transferId).sort((a,b)=>b.amount-a.amount).slice(0,5);
+  const expense = list.filter(t=>t.amount<0 && !t.transferId).sort((a,b)=>a.amount-b.amount).slice(0,5);
   const incomeHost = document.getElementById('movers-income');
   const expenseHost = document.getElementById('movers-expense');
   if(incomeHost) incomeHost.innerHTML = income.length ? income.map(moverRow).join('') :
@@ -1359,11 +1364,12 @@ function moverRow(t, i){
 
 function rowHTML_recent(t){
   const kind = categoryKind(t.category);
-  const stampClass = !t.category ? 'c-none' : (kind==='income' ? 'c-income' : 'c-expense');
+  const stampClass = t.transferId ? 'c-transfer' : (!t.category ? 'c-none' : (kind==='income' ? 'c-income' : 'c-expense'));
+  const label = t.transferId ? 'Transfer' : (t.category || 'Uncategorised');
   return `<tr>
     <td>${ukDateShort(t.date)}</td>
     <td class="desc">${escHTML(t.description)}</td>
-    <td><span class="stamp ${stampClass}">${escHTML(t.category || 'Uncategorised')}</span></td>
+    <td><span class="stamp ${stampClass}">${escHTML(label)}</span></td>
     <td class="amt ${t.amount>0?'income':''} num">${gbp(t.amount, {signed:true})}</td>
   </tr>`;
 }
@@ -1457,7 +1463,7 @@ function drawTrendChart(){
 const DONUT_COLORS = ['#0B6E4F','#A9791F','#B3392E','#2563EB','#7C3AED','#0D9488','#C2410C','#4B5563','#DB2777','#65A30D'];
 function drawDonutChart(list, chartKey, canvasId, legendId, emptyTitle, emptyDesc){
   const byCat = {};
-  list.forEach(t=>{ if(t.amount<0){ const k=t.category||'Uncategorised'; byCat[k]=(byCat[k]||0)+Math.abs(t.amount); } });
+  list.forEach(t=>{ if(t.amount<0 && !t.transferId){ const k=t.category||'Uncategorised'; byCat[k]=(byCat[k]||0)+Math.abs(t.amount); } });
   let entries = Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
   if(entries.length>8){
     const top = entries.slice(0,7);
@@ -1507,10 +1513,12 @@ function filteredSortedTx(){
     list = list.filter(t=> t.description.toLowerCase().includes(q) || (t.notes||'').toLowerCase().includes(q));
   }
   if(f.category!=='all'){
-    list = list.filter(t=> f.category==='uncategorised' ? !t.category : t.category===f.category);
+    list = list.filter(t=> f.category==='uncategorised' ? (!t.category && !t.transferId) : t.category===f.category);
   }
   if(f.type!=='all'){
-    list = list.filter(t=> f.type==='income' ? t.amount>0 : t.amount<0);
+    if(f.type==='transfer') list = list.filter(t=> !!t.transferId);
+    else if(f.type==='income') list = list.filter(t=> t.amount>0 && !t.transferId);
+    else list = list.filter(t=> t.amount<0 && !t.transferId);
   }
   if(f.from) list = list.filter(t=> t.date >= f.from);
   if(f.to) list = list.filter(t=> t.date <= f.to);
@@ -1528,6 +1536,7 @@ function filteredSortedTx(){
 }
 
 function renderTransactions(c){
+  UI.txSelected = new Set();
   const f = UI.txFilters;
   c.innerHTML = `
     <div class="filters-row">
@@ -1541,14 +1550,17 @@ function renderTransactions(c){
         <option value="all">Income & Expense</option>
         <option value="income" ${f.type==='income'?'selected':''}>Income only</option>
         <option value="expense" ${f.type==='expense'?'selected':''}>Expense only</option>
+        <option value="transfer" ${f.type==='transfer'?'selected':''}>Transfers only</option>
       </select></div>
       <div class="field"><label>From</label><input type="date" id="f-from" value="${f.from}"></div>
       <div class="field"><label>To</label><input type="date" id="f-to" value="${f.to}"></div>
       <div class="field"><label>&nbsp;</label><button class="btn btn-ghost btn-sm" id="f-clear">Clear filters</button></div>
     </div>
+    <div id="bulk-toolbar"></div>
     <div class="table-wrap">
       <table>
         <thead><tr>
+          <th style="width:32px;"><input type="checkbox" id="tx-select-all"></th>
           <th data-col="date">Date</th>
           <th data-col="description">Description</th>
           <th data-col="category">Category</th>
@@ -1577,6 +1589,12 @@ function renderTransactions(c){
       th.classList.add('sorted');
     });
   });
+  document.getElementById('tx-select-all').addEventListener('change', (e)=>{
+    const visible = filteredSortedTx();
+    if(e.target.checked) visible.forEach(t=> UI.txSelected.add(t.id));
+    else visible.forEach(t=> UI.txSelected.delete(t.id));
+    renderTxBody();
+  });
   renderTxBody();
 }
 function onTxFilterChange(){
@@ -1587,14 +1605,70 @@ function onTxFilterChange(){
   UI.txFilters.to = document.getElementById('f-to').value;
   renderTxBody();
 }
+function renderBulkToolbar(){
+  const host = document.getElementById('bulk-toolbar');
+  if(!host) return;
+  const n = UI.txSelected.size;
+  if(!n){ host.innerHTML = ''; return; }
+  const accounts = [...new Set(DB.transactions.map(t=>t.account).filter(Boolean))];
+  host.innerHTML = `
+    <div class="tag-toolbar">
+      <span class="count"><strong>${n}</strong> selected</span>
+      <button class="btn btn-sm btn-ghost" id="bulk-clear">Clear selection</button>
+      <span style="flex:1"></span>
+      <span>Set account:</span>
+      <input type="text" id="bulk-account-input" list="bulk-account-list" placeholder="e.g. Current Account" style="width:150px;">
+      <datalist id="bulk-account-list">${accounts.map(a=>`<option value="${escAttr(a)}">`).join('')}</datalist>
+      <button class="btn btn-sm" id="bulk-account-apply">Apply</button>
+      <span>Set category:</span>
+      <select id="bulk-category-select" style="min-width:150px;">${categoryOptionsHTML('')}</select>
+      <button class="btn btn-sm" id="bulk-category-apply">Apply</button>
+    </div>
+  `;
+  document.getElementById('bulk-clear').onclick = ()=>{ UI.txSelected.clear(); renderTxBody(); };
+  document.getElementById('bulk-account-apply').onclick = ()=>{
+    const val = document.getElementById('bulk-account-input').value.trim();
+    if(!val){ toast('Enter an account name', 'error'); return; }
+    let count = 0;
+    UI.txSelected.forEach(id=>{
+      const t = DB.transactions.find(x=>x.id===id);
+      if(t && !t.transferId){ t.account = val; count++; }
+    });
+    scheduleSave(); UI.txSelected.clear(); renderTxBody(); renderSidebarBits();
+    toast(`Set account to "${val}" for ${count} transaction${count===1?'':'s'}`);
+  };
+  document.getElementById('bulk-category-apply').onclick = ()=>{
+    const val = document.getElementById('bulk-category-select').value;
+    let count = 0;
+    UI.txSelected.forEach(id=>{
+      const t = DB.transactions.find(x=>x.id===id);
+      if(t && !t.transferId){ t.category = val; count++; }
+    });
+    scheduleSave(); UI.txSelected.clear(); renderTxBody(); renderSidebarBits();
+    toast(`Set category for ${count} transaction${count===1?'':'s'}`);
+  };
+}
 function renderTxBody(){
   const body = document.getElementById('tx-body');
   const list = filteredSortedTx();
+  renderBulkToolbar();
+  const selectAll = document.getElementById('tx-select-all');
+  if(selectAll){
+    selectAll.checked = list.length>0 && list.every(t=> UI.txSelected.has(t.id));
+  }
   if(!list.length){
-    body.innerHTML = `<tr class="empty-row"><td colspan="6">No transactions match these filters.</td></tr>`;
+    body.innerHTML = `<tr class="empty-row"><td colspan="7">No transactions match these filters.</td></tr>`;
     return;
   }
   body.innerHTML = list.map(rowHTML_tx).join('');
+  body.querySelectorAll('.tx-row-check').forEach(cb=>{
+    cb.addEventListener('change', (e)=>{
+      if(e.target.checked) UI.txSelected.add(e.target.dataset.id);
+      else UI.txSelected.delete(e.target.dataset.id);
+      renderBulkToolbar();
+      if(selectAll) selectAll.checked = list.every(t=> UI.txSelected.has(t.id));
+    });
+  });
   body.querySelectorAll('select.cat-select-inline').forEach(sel=>{
     sel.addEventListener('change', (e)=>{
       const id = e.target.dataset.id;
@@ -1609,7 +1683,22 @@ function renderTxBody(){
   body.querySelectorAll('[data-action="delete-tx"]').forEach(b=> b.onclick = ()=> deleteTx(b.dataset.id));
 }
 function rowHTML_tx(t){
+  const checked = UI.txSelected.has(t.id) ? 'checked' : '';
+  if(t.transferId){
+    return `<tr class="transfer-row">
+      <td><input type="checkbox" class="tx-row-check" data-id="${t.id}" ${checked}></td>
+      <td class="num">${ukDate(t.date)}</td>
+      <td class="desc" title="${escAttr(t.description)}">${escHTML(t.description)}</td>
+      <td><span class="stamp c-transfer">Transfer</span></td>
+      <td>${escHTML(t.account||'—')}</td>
+      <td class="amt ${t.amount>0?'income':''}">${gbp(t.amount,{signed:true})}</td>
+      <td class="row-actions">
+        <button class="row-icon-btn" data-action="delete-tx" data-id="${t.id}" title="Delete both sides of this transfer">${iconTrash()}</button>
+      </td>
+    </tr>`;
+  }
   return `<tr>
+    <td><input type="checkbox" class="tx-row-check" data-id="${t.id}" ${checked}></td>
     <td class="num">${ukDate(t.date)}</td>
     <td class="desc" title="${escAttr(t.description)}">${escHTML(t.description)}</td>
     <td><select class="cat-select-inline" data-id="${t.id}">${categoryOptionsHTML(t.category)}</select></td>
@@ -1627,18 +1716,21 @@ function iconTrash(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="curre
 function deleteTx(id){
   const t = DB.transactions.find(x=>x.id===id);
   if(!t) return;
+  const pair = t.transferId ? DB.transactions.find(x=> x.transferId===t.transferId && x.id!==t.id) : null;
   openModal(`
-    <div class="modal-head"><h3>Delete transaction?</h3></div>
+    <div class="modal-head"><h3>${pair ? 'Delete this transfer?' : 'Delete transaction?'}</h3></div>
     <div class="modal-body">
       <p style="margin:0 0 4px;">${escHTML(t.description)}</p>
       <p style="color:var(--ink-soft); font-size:13px; margin:0;">${ukDate(t.date)} · ${gbp(t.amount,{signed:true})}</p>
+      ${pair ? `<p style="color:var(--ink-soft); font-size:13px; margin:8px 0 0;">This will also remove the matching side: <strong>${escHTML(pair.account)}</strong> ${gbp(pair.amount,{signed:true})}.</p>` : ''}
     </div>
     <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-danger" id="m-confirm">Delete</button></div>
   `);
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('m-confirm').onclick = ()=>{
-    DB.transactions = DB.transactions.filter(x=>x.id!==id);
-    scheduleSave(); closeModal(); renderContent(); toast('Transaction deleted');
+    if(pair) DB.transactions = DB.transactions.filter(x=> x.transferId !== t.transferId);
+    else DB.transactions = DB.transactions.filter(x=>x.id!==id);
+    scheduleSave(); closeModal(); renderContent(); toast(pair ? 'Transfer deleted' : 'Transaction deleted');
   };
 }
 
@@ -1653,19 +1745,22 @@ function openTxModal(id){
         <div class="seg" id="tx-type-seg">
           <button type="button" data-k="expense" class="${!isIncome?'active':''}">Expense</button>
           <button type="button" data-k="income" class="${isIncome?'active':''}">Income</button>
+          ${t ? '' : `<button type="button" data-k="transfer">Transfer</button>`}
         </div>
       </div>
       <div class="form-grid">
         <div class="field"><label>Date</label><input type="date" id="tx-date" value="${t?t.date:todayISO()}"></div>
         <div class="field"><label>Amount (£)</label><input type="number" id="tx-amount" min="0" step="0.01" value="${t?Math.abs(t.amount).toFixed(2):''}" placeholder="0.00"></div>
-        <div class="field span2"><label>Description</label><input type="text" id="tx-desc" value="${t?escAttr(t.description):''}" placeholder="e.g. Tesco Store"></div>
-        <div class="field"><label>Category</label><select id="tx-category"></select></div>
-        <div class="field"><label>Account</label><input type="text" id="tx-account" list="account-list" value="${t?escAttr(t.account||''):'Current Account'}"></div>
+        <div class="field span2" id="tx-desc-wrap"><label>Description</label><input type="text" id="tx-desc" value="${t?escAttr(t.description):''}" placeholder="e.g. Tesco Store"></div>
+        <div class="field" id="tx-category-wrap"><label>Category</label><select id="tx-category"></select></div>
+        <div class="field" id="tx-account-wrap"><label>Account</label><input type="text" id="tx-account" list="account-list" value="${t?escAttr(t.account||''):'Current Account'}"></div>
+        <div class="field" id="tx-from-wrap" style="display:none;"><label>From account</label><input type="text" id="tx-from-account" list="account-list" placeholder="e.g. Savings"></div>
+        <div class="field" id="tx-to-wrap" style="display:none;"><label>To account</label><input type="text" id="tx-to-account" list="account-list" value="Current Account"></div>
         <datalist id="account-list">${[...new Set(DB.transactions.map(x=>x.account).filter(Boolean))].map(a=>`<option value="${escAttr(a)}">`).join('')}</datalist>
         <div class="field span2"><label>Notes (optional)</label><textarea id="tx-notes">${t?escHTML(t.notes||''):''}</textarea></div>
       </div>
     </div>
-    <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">${t?'Save changes':'Add transaction'}</button></div>
+    <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">${t?'Save changes':'Add'}</button></div>
   `);
   let currentKind = isIncome ? 'income' : 'expense';
   function fillCategories(){
@@ -1673,23 +1768,52 @@ function openTxModal(id){
     const opts = DB.categories.filter(c=>c.kind===currentKind);
     sel.innerHTML = opts.map(c=>`<option value="${escAttr(c.name)}" ${t&&t.category===c.name?'selected':''}>${escHTML(c.name)}</option>`).join('');
   }
+  function updateFieldVisibility(){
+    const isTransfer = currentKind==='transfer';
+    document.getElementById('tx-category-wrap').style.display = isTransfer ? 'none' : '';
+    document.getElementById('tx-account-wrap').style.display = isTransfer ? 'none' : '';
+    document.getElementById('tx-from-wrap').style.display = isTransfer ? '' : 'none';
+    document.getElementById('tx-to-wrap').style.display = isTransfer ? '' : 'none';
+    document.getElementById('tx-desc').placeholder = isTransfer ? 'e.g. Savings top-up (optional)' : 'e.g. Tesco Store';
+  }
   fillCategories();
+  updateFieldVisibility();
   document.getElementById('tx-type-seg').addEventListener('click', e=>{
     const b = e.target.closest('button'); if(!b) return;
     currentKind = b.dataset.k;
     document.querySelectorAll('#tx-type-seg button').forEach(x=>x.classList.toggle('active', x===b));
     fillCategories();
+    updateFieldVisibility();
   });
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('m-save').onclick = ()=>{
     const date = document.getElementById('tx-date').value;
     const amountRaw = parseFloat(document.getElementById('tx-amount').value);
+    const notes = document.getElementById('tx-notes').value.trim();
+    if(!date || isNaN(amountRaw) || amountRaw<=0){
+      toast('Please fill in date and a positive amount', 'error'); return;
+    }
+    if(currentKind==='transfer'){
+      const fromAccount = document.getElementById('tx-from-account').value.trim();
+      const toAccount = document.getElementById('tx-to-account').value.trim();
+      const desc = document.getElementById('tx-desc').value.trim();
+      if(!fromAccount || !toAccount){ toast('Enter both accounts', 'error'); return; }
+      if(fromAccount===toAccount){ toast('From and To accounts must be different', 'error'); return; }
+      const amount = Math.abs(amountRaw);
+      const tid = uid('xfer');
+      DB.transactions.push(
+        {id:uid('tx'), date, amount:-amount, description: desc || `Transfer to ${toAccount}`, category:'', account:fromAccount, notes, source:'manual', transferId:tid},
+        {id:uid('tx'), date, amount: amount, description: desc || `Transfer from ${fromAccount}`, category:'', account:toAccount, notes, source:'manual', transferId:tid},
+      );
+      scheduleSave(); closeModal(); renderContent();
+      toast(`Transfer of ${gbp(amount)} recorded`);
+      return;
+    }
     const desc = document.getElementById('tx-desc').value.trim();
     const category = document.getElementById('tx-category').value;
     const account = document.getElementById('tx-account').value.trim();
-    const notes = document.getElementById('tx-notes').value.trim();
-    if(!date || isNaN(amountRaw) || amountRaw<=0 || !desc){
-      toast('Please fill in date, description and a positive amount', 'error'); return;
+    if(!desc){
+      toast('Please enter a description', 'error'); return;
     }
     const amount = currentKind==='income' ? Math.abs(amountRaw) : -Math.abs(amountRaw);
     if(t){
@@ -1705,7 +1829,7 @@ function openTxModal(id){
 function autoCategoriseAll(){
   let count = 0;
   DB.transactions.forEach(t=>{
-    if(!t.category){
+    if(!t.category && !t.transferId){
       const s = suggestCategory(t.description);
       if(s){ t.category = s; count++; }
     }
