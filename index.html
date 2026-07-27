@@ -617,6 +617,7 @@ function buildSeedDB(){
     budgets: { 'Groceries':400, 'Dining Out':150, 'Entertainment':100, 'Transport':120, 'Subscriptions':80 },
     accountStartingBalances: { 'Savings': 300 },
     merchantAliases: {},
+    accounts: ['Current Account', 'Savings', 'Credit Card'],
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -633,6 +634,7 @@ function buildEmptyDB(){
     budgets: {},
     accountStartingBalances: {},
     merchantAliases: {},
+    accounts: [],
   };
 }
 
@@ -756,8 +758,15 @@ function sumExpense(list){ return list.reduce((s,t)=> (t.amount<0 && !t.transfer
 function currentBalance(){
   return DB.startingBalance + DB.transactions.reduce((s,t)=> s+t.amount, 0);
 }
+function allAccountNames(){
+  const names = new Set(DB.accounts);
+  Object.keys(DB.accountStartingBalances).forEach(a=> names.add(a));
+  DB.transactions.forEach(t=>{ if(t.account) names.add(t.account); });
+  return [...names].sort();
+}
 function perAccountBalances(){
-  const accounts = new Set(Object.keys(DB.accountStartingBalances));
+  const accounts = new Set(DB.accounts);
+  Object.keys(DB.accountStartingBalances).forEach(a=> accounts.add(a));
   DB.transactions.forEach(t=>{ if(t.account) accounts.add(t.account); });
   const rows = [...accounts].map(account=>{
     const list = DB.transactions.filter(t=> t.account===account);
@@ -1610,7 +1619,7 @@ function renderBulkToolbar(){
   if(!host) return;
   const n = UI.txSelected.size;
   if(!n){ host.innerHTML = ''; return; }
-  const accounts = [...new Set(DB.transactions.map(t=>t.account).filter(Boolean))];
+  const accounts = allAccountNames();
   host.innerHTML = `
     <div class="tag-toolbar">
       <span class="count"><strong>${n}</strong> selected</span>
@@ -1681,6 +1690,7 @@ function renderTxBody(){
   });
   body.querySelectorAll('[data-action="edit-tx"]').forEach(b=> b.onclick = ()=> openTxModal(b.dataset.id));
   body.querySelectorAll('[data-action="delete-tx"]').forEach(b=> b.onclick = ()=> deleteTx(b.dataset.id));
+  body.querySelectorAll('[data-action="convert-transfer"]').forEach(b=> b.onclick = ()=> openConvertToTransferModal(b.dataset.id));
 }
 function rowHTML_tx(t){
   const checked = UI.txSelected.has(t.id) ? 'checked' : '';
@@ -1705,11 +1715,13 @@ function rowHTML_tx(t){
     <td>${escHTML(t.account||'—')}</td>
     <td class="amt ${t.amount>0?'income':''}">${gbp(t.amount,{signed:true})}</td>
     <td class="row-actions">
+      <button class="row-icon-btn" data-action="convert-transfer" data-id="${t.id}" title="Convert to transfer">${iconSwap()}</button>
       <button class="row-icon-btn" data-action="edit-tx" data-id="${t.id}" title="Edit">${iconEdit()}</button>
       <button class="row-icon-btn" data-action="delete-tx" data-id="${t.id}" title="Delete">${iconTrash()}</button>
     </td>
   </tr>`;
 }
+function iconSwap(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>`; }
 function iconEdit(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>`; }
 function iconTrash(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>`; }
 
@@ -1731,6 +1743,41 @@ function deleteTx(id){
     if(pair) DB.transactions = DB.transactions.filter(x=> x.transferId !== t.transferId);
     else DB.transactions = DB.transactions.filter(x=>x.id!==id);
     scheduleSave(); closeModal(); renderContent(); toast(pair ? 'Transfer deleted' : 'Transaction deleted');
+  };
+}
+function openConvertToTransferModal(id){
+  const t = DB.transactions.find(x=>x.id===id);
+  if(!t || t.transferId) return;
+  const outgoing = t.amount<0;
+  openModal(`
+    <div class="modal-head"><h3>Convert to transfer</h3></div>
+    <div class="modal-body">
+      <p style="margin:0 0 4px;">${escHTML(t.description)}</p>
+      <p style="color:var(--ink-soft); font-size:13px; margin:0 0 14px;">${ukDate(t.date)} · ${escHTML(t.account||'—')} · ${gbp(t.amount,{signed:true})}</p>
+      <div class="field">
+        <label>${outgoing ? 'Which account did this money go TO?' : 'Which account did this money come FROM?'}</label>
+        <input type="text" id="cv-other-account" list="account-list-cv" placeholder="e.g. Savings">
+        <datalist id="account-list-cv">${allAccountNames().filter(a=>a!==t.account).map(a=>`<option value="${escAttr(a)}">`).join('')}</datalist>
+      </div>
+      <p style="color:var(--ink-faint); font-size:11.5px; margin:10px 0 0;">This will link it to a matching entry on the other account and remove its category, since transfers between your own accounts aren't counted as income or spending.</p>
+    </div>
+    <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-confirm">Convert</button></div>
+  `);
+  document.getElementById('m-cancel').onclick = closeModal;
+  document.getElementById('m-confirm').onclick = ()=>{
+    const otherAccount = document.getElementById('cv-other-account').value.trim();
+    if(!otherAccount){ toast('Enter the other account', 'error'); return; }
+    if(otherAccount === t.account){ toast('That\u2019s the same account this transaction is already on', 'error'); return; }
+    const tid = uid('xfer');
+    t.transferId = tid;
+    t.category = '';
+    DB.transactions.push({
+      id: uid('tx'), date: t.date, amount: -t.amount,
+      description: outgoing ? `Transfer from ${t.account}` : `Transfer to ${t.account}`,
+      category: '', account: otherAccount, notes: t.notes||'', source:'manual', transferId: tid,
+    });
+    scheduleSave(); closeModal(); renderContent();
+    toast('Converted to a transfer');
   };
 }
 
@@ -1756,7 +1803,7 @@ function openTxModal(id){
         <div class="field" id="tx-account-wrap"><label>Account</label><input type="text" id="tx-account" list="account-list" value="${t?escAttr(t.account||''):'Current Account'}"></div>
         <div class="field" id="tx-from-wrap" style="display:none;"><label>From account</label><input type="text" id="tx-from-account" list="account-list" placeholder="e.g. Savings"></div>
         <div class="field" id="tx-to-wrap" style="display:none;"><label>To account</label><input type="text" id="tx-to-account" list="account-list" value="Current Account"></div>
-        <datalist id="account-list">${[...new Set(DB.transactions.map(x=>x.account).filter(Boolean))].map(a=>`<option value="${escAttr(a)}">`).join('')}</datalist>
+        <datalist id="account-list">${allAccountNames().map(a=>`<option value="${escAttr(a)}">`).join('')}</datalist>
         <div class="field span2"><label>Notes (optional)</label><textarea id="tx-notes">${t?escHTML(t.notes||''):''}</textarea></div>
       </div>
     </div>
@@ -2799,10 +2846,46 @@ function renderImportStep4(body){
 /* =========================================================
    SETTINGS / BACKUP
    ========================================================= */
+function renderAccountManagerBody(){
+  const host = document.getElementById('account-manager-body');
+  if(!host) return;
+  const names = allAccountNames();
+  if(!names.length){
+    host.innerHTML = `<p style="font-size:11.5px;color:var(--ink-faint);margin:0;">No accounts yet — add one above.</p>`;
+    return;
+  }
+  host.innerHTML = `<div style="display:flex;flex-direction:column;gap:8px;">
+    ${names.map(a=>{
+      const usedCount = DB.transactions.filter(t=>t.account===a).length;
+      return `<div class="budget-input-wrap" style="justify-content:space-between;">
+        <span>${escHTML(a)} <span style="color:var(--ink-faint);font-size:10.5px;">(${usedCount} tx)</span></span>
+        <span style="display:flex;align-items:center;gap:6px;">
+          £<input type="number" step="0.01" class="account-balance-input" data-name="${escAttr(a)}" value="${DB.accountStartingBalances[a]!=null?DB.accountStartingBalances[a]:''}" placeholder="0.00" style="width:80px;">
+          <button class="row-icon-btn" data-action="remove-account" data-name="${escAttr(a)}" title="Remove from account list">${iconTrash()}</button>
+        </span>
+      </div>`;
+    }).join('')}
+  </div>`;
+  host.querySelectorAll('.account-balance-input').forEach(inp=>{
+    inp.addEventListener('change', (e)=>{
+      const name = e.target.dataset.name;
+      const v = parseFloat(e.target.value);
+      if(isNaN(v)){ delete DB.accountStartingBalances[name]; e.target.value=''; }
+      else DB.accountStartingBalances[name] = v;
+      scheduleSave();
+    });
+  });
+  host.querySelectorAll('[data-action="remove-account"]').forEach(b=>{
+    b.onclick = ()=>{
+      const name = b.dataset.name;
+      DB.accounts = DB.accounts.filter(a=>a!==name);
+      delete DB.accountStartingBalances[name];
+      scheduleSave(); renderAccountManagerBody();
+      toast(`Removed "${name}" from the account list${DB.transactions.some(t=>t.account===name) ? ' (existing transactions keep it)' : ''}`);
+    };
+  });
+}
 function openSettingsModal(){
-  const accounts = new Set(Object.keys(DB.accountStartingBalances));
-  DB.transactions.forEach(t=>{ if(t.account) accounts.add(t.account); });
-  const accountRows = [...accounts].sort();
   openModal(`
     <div class="modal-head"><h3>Settings</h3></div>
     <div class="modal-body">
@@ -2810,17 +2893,15 @@ function openSettingsModal(){
         <label>Starting balance (£)</label>
         <input type="number" step="0.01" id="s-balance" value="${DB.startingBalance}">
       </div>
-      ${accountRows.length ? `
       <div style="border-top:1px solid var(--line); padding-top:14px; margin-bottom:14px;">
-        <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Per-account starting balances (optional)</div>
-        <div style="font-size:11.5px;color:var(--ink-faint);margin-bottom:10px;">Leave blank to just total each account's own transactions. Set one to make the Accounts panel match your real bank balance.</div>
-        <div style="display:flex;flex-direction:column;gap:8px;">
-          ${accountRows.map(a=> `<label class="budget-input-wrap" style="justify-content:space-between;">
-            <span>${escHTML(a)}</span>
-            <span>£<input type="number" step="0.01" class="account-balance-input" data-name="${escAttr(a)}" value="${DB.accountStartingBalances[a]!=null?DB.accountStartingBalances[a]:''}" placeholder="0.00" style="width:80px;"></span>
-          </label>`).join('')}
+        <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Accounts</div>
+        <div style="font-size:11.5px;color:var(--ink-faint);margin-bottom:10px;">Add an account here to have it available in the Account/Transfer dropdowns before you've used it on any transaction. Give one a starting balance to make the Accounts panel match your real bank balance.</div>
+        <div style="display:flex;gap:6px;margin-bottom:10px;">
+          <input type="text" id="new-account-name" placeholder="e.g. YBS Savings" style="flex:1;">
+          <button class="btn btn-sm" id="add-account-btn">${iconPlus()} Add</button>
         </div>
-      </div>` : ''}
+        <div id="account-manager-body"></div>
+      </div>
       <div style="border-top:1px solid var(--line); padding-top:16px; display:flex; flex-direction:column; gap:8px;">
         <button class="btn" id="s-restore">Restore from backup…</button>
         <input type="file" id="s-restore-file" accept=".json,application/json" class="hidden">
@@ -2831,15 +2912,16 @@ function openSettingsModal(){
     </div>
     <div class="modal-foot"><button class="btn" id="m-cancel">Close</button><button class="btn btn-primary" id="m-save">Save</button></div>
   `);
-  document.querySelectorAll('.account-balance-input').forEach(inp=>{
-    inp.addEventListener('change', (e)=>{
-      const name = e.target.dataset.name;
-      const v = parseFloat(e.target.value);
-      if(isNaN(v)){ delete DB.accountStartingBalances[name]; e.target.value=''; }
-      else DB.accountStartingBalances[name] = v;
-      scheduleSave();
-    });
-  });
+  renderAccountManagerBody();
+  document.getElementById('add-account-btn').onclick = ()=>{
+    const input = document.getElementById('new-account-name');
+    const name = input.value.trim();
+    if(!name){ toast('Enter an account name', 'error'); return; }
+    if(allAccountNames().some(a=> a.toLowerCase()===name.toLowerCase())){ toast('That account already exists', 'error'); return; }
+    DB.accounts.push(name);
+    scheduleSave(); input.value=''; renderAccountManagerBody();
+    toast(`Added "${name}"`);
+  };
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('m-save').onclick = ()=>{
     const v = parseFloat(document.getElementById('s-balance').value);
@@ -2901,6 +2983,7 @@ function handleRestoreFile(file){
       budgets: (parsed.budgets && typeof parsed.budgets==='object') ? parsed.budgets : {},
       accountStartingBalances: (parsed.accountStartingBalances && typeof parsed.accountStartingBalances==='object') ? parsed.accountStartingBalances : {},
       merchantAliases: (parsed.merchantAliases && typeof parsed.merchantAliases==='object') ? parsed.merchantAliases : {},
+      accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
     };
     const currentCount = DB.transactions.length;
     openModal(`
@@ -2949,6 +3032,7 @@ async function init(){
   if(!DB.budgets) DB.budgets = {};
   if(!DB.accountStartingBalances) DB.accountStartingBalances = {};
   if(!DB.merchantAliases) DB.merchantAliases = {};
+  if(!DB.accounts) DB.accounts = [];
   if(!loaded) scheduleSave();
 
   document.getElementById('nav').addEventListener('click', (e)=>{
