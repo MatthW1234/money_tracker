@@ -753,8 +753,9 @@ function suggestCategory(description){
 function txInRange(from, to){
   return DB.transactions.filter(t=> t.date >= from && t.date <= to);
 }
-function sumIncome(list){ return list.reduce((s,t)=> (t.amount>0 && !t.transferId) ? s+t.amount : s, 0); }
-function sumExpense(list){ return list.reduce((s,t)=> (t.amount<0 && !t.transferId) ? s+Math.abs(t.amount) : s, 0); }
+function countsTowardTotals(t){ return !t.transferId && !t.excluded; }
+function sumIncome(list){ return list.reduce((s,t)=> (t.amount>0 && countsTowardTotals(t)) ? s+t.amount : s, 0); }
+function sumExpense(list){ return list.reduce((s,t)=> (t.amount<0 && countsTowardTotals(t)) ? s+Math.abs(t.amount) : s, 0); }
 function currentBalance(){
   return DB.startingBalance + DB.transactions.reduce((s,t)=> s+t.amount, 0);
 }
@@ -787,7 +788,7 @@ function topMerchants(list, limit){
   limit = limit || 8;
   const byMerchant = {};
   list.forEach(t=>{
-    if(t.amount>=0 || t.transferId) return;
+    if(t.amount>=0 || !countsTowardTotals(t)) return;
     const rawKey = merchantKeyFor(t.description);
     const key = DB.merchantAliases[rawKey] || rawKey;
     byMerchant[key] = byMerchant[key] || {total:0, count:0, rawKeys:new Set()};
@@ -803,7 +804,7 @@ function topMerchants(list, limit){
 function allKnownMerchantNames(){
   const names = new Set();
   DB.transactions.forEach(t=>{
-    if(t.amount>=0 || t.transferId) return;
+    if(t.amount>=0 || !countsTowardTotals(t)) return;
     let key = merchantKeyFor(t.description);
     if(DB.merchantAliases[key]) key = DB.merchantAliases[key];
     names.add(key);
@@ -869,7 +870,7 @@ function recurringKey(descKey, amount){ return descKey+'|'+Math.round(amount); }
 function detectRecurring(){
   const byDesc = {};
   DB.transactions.forEach(t=>{
-    if(t.transferId) return;
+    if(!countsTowardTotals(t)) return;
     const key = normalizeDescForRecurring(t.description);
     if(!key) return;
     (byDesc[key] = byDesc[key] || []).push(t);
@@ -1094,8 +1095,8 @@ function renderDashboard(c){
     </div>
 
     <div class="kpi-row">
-      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Income</div><div class="kpi-val income num">${gbp(income)}</div><div class="kpi-sub">${list.filter(t=>t.amount>0 && !t.transferId).length} transactions</div></div>
-      <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Expenses</div><div class="kpi-val expense num">${gbp(expense)}</div><div class="kpi-sub">${list.filter(t=>t.amount<0 && !t.transferId).length} transactions</div></div>
+      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Income</div><div class="kpi-val income num">${gbp(income)}</div><div class="kpi-sub">${list.filter(t=>t.amount>0 && countsTowardTotals(t)).length} transactions</div></div>
+      <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Expenses</div><div class="kpi-val expense num">${gbp(expense)}</div><div class="kpi-sub">${list.filter(t=>t.amount<0 && countsTowardTotals(t)).length} transactions</div></div>
       <div class="kpi-card net"><div class="stripe"></div><div class="kpi-lbl">Net</div><div class="kpi-val num" style="color:${net>=0?'var(--brand)':'var(--expense)'}">${net>=0?'+':''}${gbp(net)}</div><div class="kpi-sub">Income minus expenses</div></div>
       <div class="kpi-card balance"><div class="stripe"></div><div class="kpi-lbl">Current balance</div><div class="kpi-val num" style="color:var(--gold)">${gbp(balance)}</div><div class="kpi-sub">Starting balance + all-time activity</div></div>
     </div>
@@ -1314,7 +1315,7 @@ function renderBudgets(list, budgetEntries){
   const host = document.getElementById('budget-list');
   if(!host) return;
   const rows = budgetEntries.map(([catName, limit])=>{
-    const spent = list.filter(t=> t.category===catName && t.amount<0 && !t.transferId).reduce((s,t)=> s+Math.abs(t.amount), 0);
+    const spent = list.filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t)).reduce((s,t)=> s+Math.abs(t.amount), 0);
     const pct = limit>0 ? Math.min(999, Math.round(spent/limit*100)) : 0;
     const color = pct>=100 ? 'var(--expense)' : (pct>=80 ? 'var(--gold)' : 'var(--income)');
     return `<div class="budget-row">
@@ -1332,8 +1333,8 @@ function renderCompareTable(list, prevList){
   const host = document.getElementById('compare-table');
   if(!host) return;
   const byCat = {};
-  list.forEach(t=>{ if(t.amount<0 && !t.transferId){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].cur+=Math.abs(t.amount); } });
-  prevList.forEach(t=>{ if(t.amount<0 && !t.transferId){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].prev+=Math.abs(t.amount); } });
+  list.forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].cur+=Math.abs(t.amount); } });
+  prevList.forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].prev+=Math.abs(t.amount); } });
   const rows = Object.entries(byCat)
     .map(([name,v])=> ({name, ...v, delta:v.cur-v.prev}))
     .sort((a,b)=> Math.abs(b.delta)-Math.abs(a.delta))
@@ -1354,8 +1355,8 @@ function renderCompareTable(list, prevList){
     }).join('')}</tbody></table></div>`;
 }
 function renderMovers(list){
-  const income = list.filter(t=>t.amount>0 && !t.transferId).sort((a,b)=>b.amount-a.amount).slice(0,5);
-  const expense = list.filter(t=>t.amount<0 && !t.transferId).sort((a,b)=>a.amount-b.amount).slice(0,5);
+  const income = list.filter(t=>t.amount>0 && countsTowardTotals(t)).sort((a,b)=>b.amount-a.amount).slice(0,5);
+  const expense = list.filter(t=>t.amount<0 && countsTowardTotals(t)).sort((a,b)=>a.amount-b.amount).slice(0,5);
   const incomeHost = document.getElementById('movers-income');
   const expenseHost = document.getElementById('movers-expense');
   if(incomeHost) incomeHost.innerHTML = income.length ? income.map(moverRow).join('') :
@@ -1377,7 +1378,7 @@ function rowHTML_recent(t){
   const label = t.transferId ? 'Transfer' : (t.category || 'Uncategorised');
   return `<tr>
     <td>${ukDateShort(t.date)}</td>
-    <td class="desc">${escHTML(t.description)}</td>
+    <td class="desc">${escHTML(t.description)}${t.excluded ? ' <span class="stamp-mini" title="Not counted in income/spending totals">excl.</span>' : ''}</td>
     <td><span class="stamp ${stampClass}">${escHTML(label)}</span></td>
     <td class="amt ${t.amount>0?'income':''} num">${gbp(t.amount, {signed:true})}</td>
   </tr>`;
@@ -1472,7 +1473,7 @@ function drawTrendChart(){
 const DONUT_COLORS = ['#0B6E4F','#A9791F','#B3392E','#2563EB','#7C3AED','#0D9488','#C2410C','#4B5563','#DB2777','#65A30D'];
 function drawDonutChart(list, chartKey, canvasId, legendId, emptyTitle, emptyDesc){
   const byCat = {};
-  list.forEach(t=>{ if(t.amount<0 && !t.transferId){ const k=t.category||'Uncategorised'; byCat[k]=(byCat[k]||0)+Math.abs(t.amount); } });
+  list.forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=(byCat[k]||0)+Math.abs(t.amount); } });
   let entries = Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
   if(entries.length>8){
     const top = entries.slice(0,7);
@@ -1526,6 +1527,7 @@ function filteredSortedTx(){
   }
   if(f.type!=='all'){
     if(f.type==='transfer') list = list.filter(t=> !!t.transferId);
+    else if(f.type==='excluded') list = list.filter(t=> !!t.excluded && !t.transferId);
     else if(f.type==='income') list = list.filter(t=> t.amount>0 && !t.transferId);
     else list = list.filter(t=> t.amount<0 && !t.transferId);
   }
@@ -1560,6 +1562,7 @@ function renderTransactions(c){
         <option value="income" ${f.type==='income'?'selected':''}>Income only</option>
         <option value="expense" ${f.type==='expense'?'selected':''}>Expense only</option>
         <option value="transfer" ${f.type==='transfer'?'selected':''}>Transfers only</option>
+        <option value="excluded" ${f.type==='excluded'?'selected':''}>Excluded from totals</option>
       </select></div>
       <div class="field"><label>From</label><input type="date" id="f-from" value="${f.from}"></div>
       <div class="field"><label>To</label><input type="date" id="f-to" value="${f.to}"></div>
@@ -1710,7 +1713,7 @@ function rowHTML_tx(t){
   return `<tr>
     <td><input type="checkbox" class="tx-row-check" data-id="${t.id}" ${checked}></td>
     <td class="num">${ukDate(t.date)}</td>
-    <td class="desc" title="${escAttr(t.description)}">${escHTML(t.description)}</td>
+    <td class="desc" title="${escAttr(t.description)}">${escHTML(t.description)}${t.excluded ? ' <span class="stamp-mini" title="Not counted in income/spending totals">excl.</span>' : ''}</td>
     <td><select class="cat-select-inline" data-id="${t.id}">${categoryOptionsHTML(t.category)}</select></td>
     <td>${escHTML(t.account||'—')}</td>
     <td class="amt ${t.amount>0?'income':''}">${gbp(t.amount,{signed:true})}</td>
@@ -1804,6 +1807,12 @@ function openTxModal(id){
         <div class="field" id="tx-from-wrap" style="display:none;"><label>From account</label><input type="text" id="tx-from-account" list="account-list" placeholder="e.g. Savings"></div>
         <div class="field" id="tx-to-wrap" style="display:none;"><label>To account</label><input type="text" id="tx-to-account" list="account-list" value="Current Account"></div>
         <datalist id="account-list">${allAccountNames().map(a=>`<option value="${escAttr(a)}">`).join('')}</datalist>
+        <div class="field span2" id="tx-excluded-wrap">
+          <label class="regular-toggle" style="font-size:12.5px;">
+            <input type="checkbox" id="tx-excluded" ${t&&t.excluded?'checked':''}> Don't count this as income or spending
+          </label>
+          <div style="font-size:11px;color:var(--ink-faint);margin-top:3px;">For things like money you're holding for someone else — it still counts toward your balance, just not your income/spending totals, budgets or recurring detection.</div>
+        </div>
         <div class="field span2"><label>Notes (optional)</label><textarea id="tx-notes">${t?escHTML(t.notes||''):''}</textarea></div>
       </div>
     </div>
@@ -1821,6 +1830,7 @@ function openTxModal(id){
     document.getElementById('tx-account-wrap').style.display = isTransfer ? 'none' : '';
     document.getElementById('tx-from-wrap').style.display = isTransfer ? '' : 'none';
     document.getElementById('tx-to-wrap').style.display = isTransfer ? '' : 'none';
+    document.getElementById('tx-excluded-wrap').style.display = isTransfer ? 'none' : '';
     document.getElementById('tx-desc').placeholder = isTransfer ? 'e.g. Savings top-up (optional)' : 'e.g. Tesco Store';
   }
   fillCategories();
@@ -1859,14 +1869,15 @@ function openTxModal(id){
     const desc = document.getElementById('tx-desc').value.trim();
     const category = document.getElementById('tx-category').value;
     const account = document.getElementById('tx-account').value.trim();
+    const excluded = document.getElementById('tx-excluded').checked;
     if(!desc){
       toast('Please enter a description', 'error'); return;
     }
     const amount = currentKind==='income' ? Math.abs(amountRaw) : -Math.abs(amountRaw);
     if(t){
-      Object.assign(t, {date, amount, description:desc, category, account, notes});
+      Object.assign(t, {date, amount, description:desc, category, account, notes, excluded});
     } else {
-      DB.transactions.push({id:uid('tx'), date, amount, description:desc, category, account, notes, source:'manual'});
+      DB.transactions.push({id:uid('tx'), date, amount, description:desc, category, account, notes, excluded, source:'manual'});
     }
     scheduleSave(); closeModal(); renderContent();
     toast(t?'Transaction updated':'Transaction added');
