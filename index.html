@@ -235,6 +235,9 @@ a{ color:inherit; }
 .stamp.c-expense{ color:var(--expense); background:var(--expense-wash); }
 .stamp.c-none{ color:var(--ink-faint); background:var(--surface-2); border-style:dashed; }
 .stamp.c-transfer{ color:var(--gold); background:var(--gold-wash); }
+.cat-badge-clickable{ cursor:pointer; transition:box-shadow .12s ease; }
+.cat-badge-clickable:hover{ box-shadow:0 0 0 2px currentColor inset; }
+td.cat-cell{ white-space:nowrap; }
 tr.transfer-row{ background:var(--surface-2); }
 tr.transfer-row:hover{ background:var(--gold-wash); }
 
@@ -618,6 +621,7 @@ function buildSeedDB(){
     accountStartingBalances: { 'Savings': 300 },
     merchantAliases: {},
     accounts: ['Current Account', 'Savings', 'Credit Card'],
+    discretionaryCategories: ['Dining Out', 'Entertainment', 'Shopping', 'Subscriptions', 'Travel'],
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -635,6 +639,7 @@ function buildEmptyDB(){
     accountStartingBalances: {},
     merchantAliases: {},
     accounts: [],
+    discretionaryCategories: [],
   };
 }
 
@@ -982,6 +987,7 @@ const UI = {
   dashboardYearOffset: 0,
   trendGran: 'month',
   balanceGran: 'month',
+  showForecast: false,
   txSort: {col:'date', dir:'desc'},
   txSelected: new Set(),
   txFilters: {search:'', category:'all', type:'all', from:'', to:''},
@@ -1023,9 +1029,12 @@ function renderTopbarActions(){
   if(UI.tab==='transactions'){
     host.innerHTML = `
       <button class="btn" id="btn-autocat">${iconWand()} Auto-categorise</button>
+      <button class="btn" id="btn-recheck">${iconRefresh()} Re-check all</button>
       <button class="btn btn-primary" id="btn-add-tx">${iconPlus()} Add transaction</button>`;
     document.getElementById('btn-add-tx').onclick = ()=> openTxModal(null);
     document.getElementById('btn-autocat').onclick = autoCategoriseAll;
+    document.getElementById('btn-recheck').onclick = reapplyRulesToAll;
+    updateRecheckButtonLabel();
   } else if(UI.tab==='categories'){
     host.innerHTML = `<button class="btn btn-primary" id="btn-add-cat">${iconPlus()} Add category</button>`;
     document.getElementById('btn-add-cat').onclick = ()=> openCategoryModal(null);
@@ -1039,6 +1048,7 @@ function renderTopbarActions(){
 
 function iconPlus(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`; }
 function iconWand(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8 19 13M15 9l-9.9 9.9a1 1 0 0 0 0 1.4l.6.6a1 1 0 0 0 1.4 0L17 12"/></svg>`; }
+function iconRefresh(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`; }
 function iconChevronLeft(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>`; }
 function iconChevronRight(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>`; }
 
@@ -1063,6 +1073,9 @@ function renderDashboard(c){
 
   const budgetEntries = Object.entries(DB.budgets);
   const showBudgets = UI.dashboardPeriod==='month' && budgetEntries.length>0;
+
+  const savingsOpps = UI.dashboardPeriod==='month' ? computeSavingsOpportunities(list, range).filter(o=> o.diff > 1) : [];
+  const showSavingsOpps = UI.dashboardPeriod==='month' && savingsOpps.length>0;
 
   const accountRows = perAccountBalances();
   const merchants = topMerchants(list, 8);
@@ -1118,13 +1131,24 @@ function renderDashboard(c){
     <div class="panel">
       <div class="panel-head">
         <div class="panel-title">Balance over time<small>Your actual balance trajectory, not just flow in vs out</small></div>
-        <div class="seg" id="balance-seg">
-          <button data-g="week" class="${UI.balanceGran==='week'?'active':''}">Weekly</button>
-          <button data-g="month" class="${UI.balanceGran==='month'?'active':''}">Monthly</button>
-          <button data-g="year" class="${UI.balanceGran==='year'?'active':''}">Yearly</button>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label class="regular-toggle" style="font-size:11.5px;">
+            <input type="checkbox" id="balance-forecast-toggle" ${UI.showForecast?'checked':''}> Show forecast
+          </label>
+          <div class="seg" id="balance-seg">
+            <button data-g="week" class="${UI.balanceGran==='week'?'active':''}">Weekly</button>
+            <button data-g="month" class="${UI.balanceGran==='month'?'active':''}">Monthly</button>
+            <button data-g="year" class="${UI.balanceGran==='year'?'active':''}">Yearly</button>
+          </div>
         </div>
       </div>
       <div class="chart-wrap"><canvas id="balance-chart"></canvas></div>
+      ${UI.showForecast ? `<p style="font-size:11px;color:var(--ink-faint);margin:10px 2px 0;">Dashed line is a rough projection based on your average net flow over the last 3 periods — not a guarantee, and it won't know about one-off bills or changes ahead.</p>` : ''}
+    </div>
+
+    <div class="panel" style="margin-top:16px;">
+      <div class="panel-head"><div class="panel-title">Cash flow<small>${range.label} · where income actually went</small></div></div>
+      <div class="chart-wrap"><canvas id="cashflow-chart"></canvas></div>
     </div>
 
     <div class="grid-2" style="margin-top:16px;">
@@ -1176,6 +1200,12 @@ function renderDashboard(c){
     <div class="panel" style="margin-top:16px;">
       <div class="panel-head"><div class="panel-title">Budgets<small>${range.label}</small></div></div>
       <div id="budget-list"></div>
+    </div>` : ''}
+
+    ${showSavingsOpps ? `
+    <div class="panel" style="margin-top:16px;">
+      <div class="panel-head"><div class="panel-title">Savings opportunities<small>Discretionary categories running above your usual — ${range.label}</small></div></div>
+      <div id="savings-opps-list"></div>
     </div>` : ''}
 
     ${showCompare ? `
@@ -1231,6 +1261,10 @@ function renderDashboard(c){
     document.querySelectorAll('#balance-seg button').forEach(x=> x.classList.toggle('active', x===b));
     drawBalanceChart();
   });
+  document.getElementById('balance-forecast-toggle').addEventListener('change', e=>{
+    UI.showForecast = e.target.checked;
+    renderDashboard(c);
+  });
   document.getElementById('view-all-tx').onclick = ()=> { document.querySelector('[data-tab="transactions"]').click(); };
 
   const recentBody = document.getElementById('recent-body');
@@ -1240,11 +1274,13 @@ function renderDashboard(c){
 
   drawTrendChart();
   drawBalanceChart();
+  drawCashFlowChart(list, income);
   drawCategoryChart(list);
   drawYTDChart();
   renderMovers(list);
   renderMerchants(merchants);
   if(showBudgets) renderBudgets(list, budgetEntries);
+  if(showSavingsOpps) renderSavingsOpportunities(savingsOpps);
   if(showCompare) renderCompareTable(list, prevList);
 }
 function compareStatHTML(label, current, previous, higherIsGood){
@@ -1311,6 +1347,28 @@ function openMerchantMergeModal(currentName, rawKeys){
     toast(`Grouped under "${newName}"`);
   };
 }
+function computeSavingsOpportunities(list, range){
+  const periodStart = new Date(range.from+'T00:00:00');
+  const results = [];
+  DB.discretionaryCategories.forEach(catName=>{
+    if(!DB.categories.some(c=>c.name===catName)) return;
+    const current = list.filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t)).reduce((s,t)=> s+Math.abs(t.amount), 0);
+    const monthlyTotals = [];
+    for(let i=1;i<=3;i++){
+      const base = new Date(periodStart.getFullYear(), periodStart.getMonth()-i, 1);
+      const from = base.toISOString().slice(0,10);
+      const to = new Date(base.getFullYear(), base.getMonth()+1, 0).toISOString().slice(0,10);
+      const monthSpend = txInRange(from,to)
+        .filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t))
+        .reduce((s,t)=> s+Math.abs(t.amount), 0);
+      if(monthSpend>0) monthlyTotals.push(monthSpend);
+    }
+    if(!monthlyTotals.length) return;
+    const average = monthlyTotals.reduce((s,v)=>s+v,0) / monthlyTotals.length;
+    results.push({ category:catName, current, average, diff: current-average, monthsOfHistory: monthlyTotals.length });
+  });
+  return results.sort((a,b)=> b.diff-a.diff);
+}
 function renderBudgets(list, budgetEntries){
   const host = document.getElementById('budget-list');
   if(!host) return;
@@ -1328,6 +1386,27 @@ function renderBudgets(list, budgetEntries){
     </div>`;
   }).join('');
   host.innerHTML = `<div class="budget-grid">${rows}</div>`;
+}
+function renderSavingsOpportunities(opps){
+  const host = document.getElementById('savings-opps-list');
+  if(!host) return;
+  const total = opps.reduce((s,o)=> s+o.diff, 0);
+  const rows = opps.map(o=>{
+    const pct = o.average>0 ? Math.round(o.diff/o.average*100) : null;
+    return `<div class="merchant-row">
+      <span class="merchant-rank" style="background:var(--expense-wash);color:var(--expense);">↑</span>
+      <div class="merchant-mid">
+        <div class="merchant-top"><span class="merchant-name">${escHTML(o.category)}</span><span class="merchant-amt num" style="color:var(--expense);">+${gbp(o.diff)}</span></div>
+        <div style="font-size:11px;color:var(--ink-faint);">${gbp(o.current)} this period vs your ${gbp(o.average)} average (${o.monthsOfHistory}mo)${pct!=null?` · ${pct}% higher`:''}</div>
+      </div>
+    </div>`;
+  }).join('');
+  host.innerHTML = `
+    <div style="margin-bottom:12px;padding:10px 14px;background:var(--expense-wash);border-radius:9px;font-size:13px;color:var(--ink);">
+      Getting these back to your usual spending could free up roughly <strong>${gbp(total)}</strong> this period.
+    </div>
+    <div class="merchant-rows">${rows}</div>
+  `;
 }
 function renderCompareTable(list, prevList){
   const host = document.getElementById('compare-table');
@@ -1415,31 +1494,136 @@ function trendBuckets(gran){
 function balanceAt(dateISO){
   return DB.startingBalance + DB.transactions.reduce((s,t)=> t.date<=dateISO ? s+t.amount : s, 0);
 }
+function computeForecastBuckets(gran, historicalBuckets, count){
+  count = count || 6;
+  const last3 = historicalBuckets.slice(-3);
+  const nets = last3.map(b=> sumIncome(txInRange(b.from,b.to)) - sumExpense(txInRange(b.from,b.to)));
+  const avgNet = nets.length ? nets.reduce((s,v)=>s+v,0)/nets.length : 0;
+  let prevTo = historicalBuckets[historicalBuckets.length-1].to;
+  let bal = balanceAt(prevTo);
+  const out = [];
+  for(let i=0;i<count;i++){
+    let from, to, label;
+    if(gran==='week'){
+      from = addDays(prevTo,1); to = addDays(from,6); label = ukDateShort(from);
+    } else if(gran==='month'){
+      const d = new Date(prevTo+'T00:00:00');
+      const nextMonth = new Date(d.getFullYear(), d.getMonth()+1, 1);
+      from = nextMonth.toISOString().slice(0,10);
+      to = new Date(nextMonth.getFullYear(), nextMonth.getMonth()+1, 0).toISOString().slice(0,10);
+      label = monthLabel(from.slice(0,7));
+    } else {
+      const y = parseInt(prevTo.slice(0,4))+1;
+      from = `${y}-01-01`; to = `${y}-12-31`; label = String(y);
+    }
+    bal += avgNet;
+    out.push({label, balance:bal});
+    prevTo = to;
+  }
+  return out;
+}
 function drawBalanceChart(){
   const buckets = trendBuckets(UI.balanceGran);
   const data = buckets.map(b=> balanceAt(b.to));
   const ctx = document.getElementById('balance-chart');
   if(!ctx) return;
   if(UI.charts.balance) UI.charts.balance.destroy();
+  const datasets = [{
+    label: 'Balance', data, tension:.3, fill:true, borderWidth:2.5, pointRadius:2,
+    borderColor: '#0B6E4F', backgroundColor: 'rgba(11,110,79,.08)',
+    segment: {
+      borderColor: (c)=> (c.p0.parsed.y<0 || c.p1.parsed.y<0) ? '#B3392E' : '#0B6E4F',
+    },
+  }];
+  let labels = buckets.map(b=>b.label);
+  if(UI.showForecast){
+    const forecast = computeForecastBuckets(UI.balanceGran, buckets, 6);
+    labels = [...labels, ...forecast.map(f=>f.label)];
+    const forecastData = [
+      ...new Array(buckets.length-1).fill(null),
+      data[data.length-1],
+      ...forecast.map(f=>f.balance),
+    ];
+    datasets.push({
+      label:'Forecast', data:forecastData, tension:.3, fill:false, borderWidth:2, pointRadius:2,
+      borderColor:'#A9791F', borderDash:[6,4],
+    });
+    datasets[0].data = [...data, ...new Array(forecast.length).fill(null)];
+  }
   UI.charts.balance = new Chart(ctx, {
     type: 'line',
-    data: {
-      labels: buckets.map(b=>b.label),
-      datasets: [{
-        label: 'Balance', data, tension:.3, fill:true, borderWidth:2.5, pointRadius:2,
-        borderColor: '#0B6E4F', backgroundColor: 'rgba(11,110,79,.08)',
-        segment: {
-          borderColor: (c)=> (c.p0.parsed.y<0 || c.p1.parsed.y<0) ? '#B3392E' : '#0B6E4F',
-        },
-      }]
-    },
+    data: { labels, datasets },
     options:{
       responsive:true, maintainAspectRatio:false,
       interaction:{mode:'index', intersect:false},
-      plugins:{ legend:{display:false},
-        tooltip:{callbacks:{label:(ctx)=> ` Balance: ${gbp(ctx.parsed.y)}`}} },
+      plugins:{ legend:{display: UI.showForecast, position:'bottom', labels:{boxWidth:10, usePointStyle:true, font:{family:"'Inter',sans-serif", size:11}}},
+        tooltip:{callbacks:{label:(ctx)=> ctx.parsed.y==null ? undefined : ` ${ctx.dataset.label}: ${gbp(ctx.parsed.y)}`}} },
       scales:{ y:{ ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}}, grid:{color:'#E7EBE3'} },
                 x:{ grid:{display:false}, ticks:{font:{size:11}} } }
+    }
+  });
+}
+function drawCashFlowChart(list, income){
+  const ctx = document.getElementById('cashflow-chart');
+  if(!ctx) return;
+  if(UI.charts.cashflow) UI.charts.cashflow.destroy();
+  const byCat = {};
+  list.forEach(t=>{
+    if(t.amount<0 && countsTowardTotals(t)){
+      const k = t.category || 'Uncategorised';
+      byCat[k] = (byCat[k]||0) + Math.abs(t.amount);
+    }
+  });
+  const sorted = Object.entries(byCat).sort((a,b)=> b[1]-a[1]);
+  const top = sorted.slice(0,5);
+  const otherSum = sorted.slice(5).reduce((s,e)=> s+e[1], 0);
+
+  const bars = [{ label:'Income', from:0, to:income, kind:'income' }];
+  let running = income;
+  top.forEach(([name,amt])=>{
+    bars.push({ label:name, from:running, to:running-amt, kind:'expense' });
+    running -= amt;
+  });
+  if(otherSum>0){
+    bars.push({ label:'Other', from:running, to:running-otherSum, kind:'expense' });
+    running -= otherSum;
+  }
+  bars.push({ label:'Net', from:0, to:running, kind: running>=0?'net-pos':'net-neg' });
+
+  if(income<=0 && bars.length<=1){
+    ctx.parentElement.innerHTML = `<div class="empty-state" style="padding:30px 10px;"><h4>No cash flow yet</h4><p style="font-size:12.5px;">Income and spending for this period will appear here.</p></div>`;
+    return;
+  }
+
+  const base = bars.map(b=> Math.min(b.from,b.to));
+  const range = bars.map(b=> Math.abs(b.to-b.from));
+  const colors = bars.map(b=> b.kind==='income' ? '#1E8E5A' : b.kind==='net-pos' ? '#0B6E4F' : b.kind==='net-neg' ? '#B3392E' : '#C1443D');
+
+  UI.charts.cashflow = new Chart(ctx, {
+    type:'bar',
+    data:{
+      labels: bars.map(b=>b.label),
+      datasets:[
+        { data:base, backgroundColor:'transparent', stack:'s' },
+        { data:range, backgroundColor:colors, stack:'s', borderRadius:3 },
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false},
+        tooltip:{ callbacks:{
+          title:(items)=> bars[items[0].dataIndex].label,
+          label:(item)=>{
+            if(item.datasetIndex===0) return undefined;
+            const b = bars[item.dataIndex];
+            const delta = b.to-b.from;
+            return ` ${delta>=0?'+':''}${gbp(delta)}`;
+          }
+        } } },
+      scales:{
+        y:{ stacked:true, ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}}, grid:{color:'#E7EBE3'} },
+        x:{ stacked:true, grid:{display:false}, ticks:{font:{size:10.5}} }
+      }
     }
   });
 }
@@ -1584,13 +1768,19 @@ function renderTransactions(c){
       </table>
     </div>
   `;
+  let txFilterDebounce = null;
+  const debouncedFilterChange = ()=>{
+    clearTimeout(txFilterDebounce);
+    txFilterDebounce = setTimeout(onTxFilterChange, 180);
+  };
   ['f-search','f-category','f-type','f-from','f-to'].forEach(id=>{
-    document.getElementById(id).addEventListener('input', onTxFilterChange);
+    document.getElementById(id).addEventListener('input', debouncedFilterChange);
     document.getElementById(id).addEventListener('change', onTxFilterChange);
   });
   document.getElementById('f-clear').onclick = ()=>{
     UI.txFilters = {search:'', category:'all', type:'all', from:'', to:''};
     renderTransactions(c);
+    updateRecheckButtonLabel();
   };
   document.querySelectorAll('th[data-col]').forEach(th=>{
     th.addEventListener('click', ()=>{
@@ -1607,6 +1797,9 @@ function renderTransactions(c){
     else visible.forEach(t=> UI.txSelected.delete(t.id));
     renderTxBody();
   });
+  const txBody = document.getElementById('tx-body');
+  txBody.addEventListener('click', handleTxBodyClick);
+  txBody.addEventListener('change', handleTxBodyChange);
   renderTxBody();
 }
 function onTxFilterChange(){
@@ -1616,6 +1809,14 @@ function onTxFilterChange(){
   UI.txFilters.from = document.getElementById('f-from').value;
   UI.txFilters.to = document.getElementById('f-to').value;
   renderTxBody();
+  updateRecheckButtonLabel();
+}
+function updateRecheckButtonLabel(){
+  const btn = document.getElementById('btn-recheck');
+  if(!btn) return;
+  const f = UI.txFilters;
+  const isFiltered = !!(f.search || f.category!=='all' || f.type!=='all' || f.from || f.to);
+  btn.innerHTML = isFiltered ? `${iconRefresh()} Re-check filtered` : `${iconRefresh()} Re-check all`;
 }
 function renderBulkToolbar(){
   const host = document.getElementById('bulk-toolbar');
@@ -1673,28 +1874,64 @@ function renderTxBody(){
     return;
   }
   body.innerHTML = list.map(rowHTML_tx).join('');
-  body.querySelectorAll('.tx-row-check').forEach(cb=>{
-    cb.addEventListener('change', (e)=>{
-      if(e.target.checked) UI.txSelected.add(e.target.dataset.id);
-      else UI.txSelected.delete(e.target.dataset.id);
-      renderBulkToolbar();
-      if(selectAll) selectAll.checked = list.every(t=> UI.txSelected.has(t.id));
-    });
-  });
-  body.querySelectorAll('select.cat-select-inline').forEach(sel=>{
-    sel.addEventListener('change', (e)=>{
-      const id = e.target.dataset.id;
-      const t = DB.transactions.find(x=>x.id===id);
-      t.category = e.target.value;
-      scheduleSave();
-      renderSidebarBits();
-      toast('Category updated');
-    });
-  });
-  body.querySelectorAll('[data-action="edit-tx"]').forEach(b=> b.onclick = ()=> openTxModal(b.dataset.id));
-  body.querySelectorAll('[data-action="delete-tx"]').forEach(b=> b.onclick = ()=> deleteTx(b.dataset.id));
-  body.querySelectorAll('[data-action="convert-transfer"]').forEach(b=> b.onclick = ()=> openConvertToTransferModal(b.dataset.id));
-  body.querySelectorAll('[data-action="revert-transfer"]').forEach(b=> b.onclick = ()=> revertTransfer(b.dataset.id));
+}
+function handleTxBodyClick(e){
+  const badge = e.target.closest('[data-action="open-cat-picker"]');
+  if(badge){ openInlineCategoryPicker(badge); return; }
+  const editBtn = e.target.closest('[data-action="edit-tx"]');
+  if(editBtn){ openTxModal(editBtn.dataset.id); return; }
+  const delBtn = e.target.closest('[data-action="delete-tx"]');
+  if(delBtn){ deleteTx(delBtn.dataset.id); return; }
+  const convBtn = e.target.closest('[data-action="convert-transfer"]');
+  if(convBtn){ openConvertToTransferModal(convBtn.dataset.id); return; }
+  const revBtn = e.target.closest('[data-action="revert-transfer"]');
+  if(revBtn){ revertTransfer(revBtn.dataset.id); return; }
+}
+function handleTxBodyChange(e){
+  if(!e.target.classList.contains('tx-row-check')) return;
+  const id = e.target.dataset.id;
+  if(e.target.checked) UI.txSelected.add(id);
+  else UI.txSelected.delete(id);
+  renderBulkToolbar();
+  const selectAll = document.getElementById('tx-select-all');
+  if(selectAll){
+    const list = filteredSortedTx();
+    selectAll.checked = list.length>0 && list.every(t=> UI.txSelected.has(t.id));
+  }
+}
+function openInlineCategoryPicker(badgeEl){
+  const id = badgeEl.dataset.id;
+  const t = DB.transactions.find(x=>x.id===id);
+  if(!t) return;
+  const td = badgeEl.closest('td');
+  const sel = document.createElement('select');
+  sel.className = 'cat-select-inline';
+  sel.innerHTML = categoryOptionsHTML(t.category);
+  sel.value = t.category || '';
+  td.innerHTML = '';
+  td.appendChild(sel);
+  sel.focus();
+  let committed = false;
+  function commit(){
+    if(committed) return;
+    committed = true;
+    t.category = sel.value;
+    scheduleSave();
+    renderSidebarBits();
+    const kind = categoryKind(t.category);
+    const stampClass = !t.category ? 'c-none' : (kind==='income' ? 'c-income' : 'c-expense');
+    const badge = document.createElement('span');
+    badge.className = `stamp ${stampClass} cat-badge-clickable`;
+    badge.dataset.action = 'open-cat-picker';
+    badge.dataset.id = t.id;
+    badge.title = 'Click to change category';
+    badge.textContent = t.category || 'Uncategorised';
+    td.innerHTML = '';
+    td.appendChild(badge);
+    toast('Category updated');
+  }
+  sel.addEventListener('change', commit);
+  sel.addEventListener('blur', commit);
 }
 function rowHTML_tx(t){
   const checked = UI.txSelected.has(t.id) ? 'checked' : '';
@@ -1712,11 +1949,13 @@ function rowHTML_tx(t){
       </td>
     </tr>`;
   }
+  const kind = categoryKind(t.category);
+  const stampClass = !t.category ? 'c-none' : (kind==='income' ? 'c-income' : 'c-expense');
   return `<tr>
     <td><input type="checkbox" class="tx-row-check" data-id="${t.id}" ${checked}></td>
     <td class="num">${ukDate(t.date)}</td>
     <td class="desc" title="${escAttr(t.description)}">${escHTML(t.description)}${t.excluded ? ' <span class="stamp-mini" title="Not counted in income/spending totals">excl.</span>' : ''}</td>
-    <td><select class="cat-select-inline" data-id="${t.id}">${categoryOptionsHTML(t.category)}</select></td>
+    <td class="cat-cell"><span class="stamp ${stampClass} cat-badge-clickable" data-action="open-cat-picker" data-id="${t.id}" title="Click to change category">${escHTML(t.category || 'Uncategorised')}</span></td>
     <td>${escHTML(t.account||'—')}</td>
     <td class="amt ${t.amount>0?'income':''}">${gbp(t.amount,{signed:true})}</td>
     <td class="row-actions">
@@ -1922,6 +2161,41 @@ function autoCategoriseAll(){
   });
   if(count){ scheduleSave(); renderContent(); toast(`Auto-categorised ${count} transaction${count===1?'':'s'}`); }
   else toast('No matching rules for your uncategorised transactions');
+}
+function reapplyRulesToAll(){
+  const f = UI.txFilters;
+  const isFiltered = !!(f.search || f.category!=='all' || f.type!=='all' || f.from || f.to);
+  const scope = filteredSortedTx();
+  const changes = [];
+  scope.forEach(t=>{
+    if(t.transferId) return;
+    const suggested = suggestCategory(t.description);
+    if(suggested && suggested !== t.category){
+      changes.push({id:t.id, description:t.description, from:t.category||'Uncategorised', to:suggested});
+    }
+  });
+  const scopeLabel = isFiltered ? `within your current filters (${scope.length} transaction${scope.length===1?'':'s'} matched)` : `across all ${scope.length} transactions`;
+  if(!changes.length){ toast(`Everything ${scopeLabel} already matches your current rules`); return; }
+  openModal(`
+    <div class="modal-head"><h3>Re-check ${isFiltered?'filtered':'all'} categories?</h3></div>
+    <div class="modal-body">
+      <p style="margin:0 0 10px;color:var(--ink-soft);font-size:13px;">${changes.length} transaction${changes.length===1?'':'s'} ${scopeLabel} will be updated to match your current rules — including ones that already have a different category assigned.</p>
+      <div style="max-height:200px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:4px 10px;">
+        ${changes.slice(0,10).map(c=>`<div style="font-size:12px;padding:6px 0;border-bottom:1px solid var(--line);">${escHTML(c.description)}<br><span style="color:var(--ink-faint);">${escHTML(c.from)}</span> → <strong>${escHTML(c.to)}</strong></div>`).join('')}
+        ${changes.length>10 ? `<div style="font-size:11.5px;color:var(--ink-faint);padding:6px 0 2px;">and ${changes.length-10} more…</div>` : ''}
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-confirm">Update ${changes.length}</button></div>
+  `);
+  document.getElementById('m-cancel').onclick = closeModal;
+  document.getElementById('m-confirm').onclick = ()=>{
+    changes.forEach(c=>{
+      const t = DB.transactions.find(x=>x.id===c.id);
+      if(t) t.category = c.to;
+    });
+    scheduleSave(); closeModal(); renderContent();
+    toast(`Updated ${changes.length} transaction${changes.length===1?'':'s'}`);
+  };
 }
 
 /* =========================================================
@@ -2354,6 +2628,7 @@ function renderCatList(){
       cats.map(cat=>{
         const used = DB.transactions.filter(t=>t.category===cat.name).length;
         const isRegular = DB.regularCategories.includes(cat.name);
+        const isDiscretionary = DB.discretionaryCategories.includes(cat.name);
         const budget = DB.budgets[cat.name];
         return `<div class="cat-list-row">
           <span class="stamp ${kind==='income'?'c-income':'c-expense'}">${escHTML(cat.name)}</span>
@@ -2362,6 +2637,9 @@ function renderCatList(){
           <label class="regular-toggle" title="Estimate this category as a regular monthly ${kind==='income'?'income':'cost'} in Spending Plan, from your recent history — useful when the transactions vary in amount or description, like a credit card bill.">
             <input type="checkbox" data-action="toggle-regular" data-name="${escAttr(cat.name)}" ${isRegular?'checked':''}> Regular
           </label>
+          ${kind==='expense' ? `<label class="regular-toggle" title="Flag this as discretionary (non-essential) spending, so it's included in Savings Opportunities on the dashboard.">
+            <input type="checkbox" data-action="toggle-discretionary" data-name="${escAttr(cat.name)}" ${isDiscretionary?'checked':''}> Discretionary
+          </label>` : ''}
           ${kind==='expense' ? `<label class="budget-input-wrap" title="Set a monthly budget for this category — shown as a progress bar on your dashboard.">
             Budget £<input type="number" min="0" step="1" class="budget-input" data-name="${escAttr(cat.name)}" value="${budget!=null?budget:''}" placeholder="—">/mo
           </label>` : ''}
@@ -2392,6 +2670,18 @@ function renderCatList(){
       toast(e.target.checked ? `${name} will be estimated as regular in Spending Plan` : `${name} no longer tracked as regular`);
     };
   });
+  host.querySelectorAll('[data-action="toggle-discretionary"]').forEach(cb=>{
+    cb.onchange = (e)=>{
+      const name = e.target.dataset.name;
+      if(e.target.checked){
+        if(!DB.discretionaryCategories.includes(name)) DB.discretionaryCategories.push(name);
+      } else {
+        DB.discretionaryCategories = DB.discretionaryCategories.filter(n=>n!==name);
+      }
+      scheduleSave();
+      toast(e.target.checked ? `${name} included in Savings Opportunities` : `${name} excluded from Savings Opportunities`);
+    };
+  });
 }
 function renderRuleList(){
   const host = document.getElementById('rule-list');
@@ -2402,9 +2692,11 @@ function renderRuleList(){
       <span class="kw">${escHTML(r.keyword)}</span>
       <span class="arrow">→</span>
       <span class="rc"><strong>${escHTML(r.category)}</strong></span>
+      <button class="row-icon-btn" data-action="edit-rule" data-i="${i}" title="Edit">${iconEdit()}</button>
       <button class="row-icon-btn" data-action="del-rule" data-i="${i}" title="Delete">${iconTrash()}</button>
     </div>
   `).join('');
+  host.querySelectorAll('[data-action="edit-rule"]').forEach(b=> b.onclick = ()=> openRuleModal(parseInt(b.dataset.i)));
   host.querySelectorAll('[data-action="del-rule"]').forEach(b=> b.onclick = ()=>{
     DB.rules.splice(parseInt(b.dataset.i),1); scheduleSave(); renderRuleList(); toast('Rule deleted');
   });
@@ -2422,6 +2714,7 @@ function deleteCategory(name){
     DB.transactions.forEach(t=>{ if(t.category===name) t.category=''; });
     DB.rules = DB.rules.filter(r=>r.category!==name);
     DB.regularCategories = DB.regularCategories.filter(n=>n!==name);
+    DB.discretionaryCategories = DB.discretionaryCategories.filter(n=>n!==name);
     delete DB.budgets[name];
     scheduleSave(); closeModal(); renderContent(); toast('Category deleted');
   };
@@ -2454,26 +2747,32 @@ function openCategoryModal(){
     scheduleSave(); closeModal(); renderContent(); toast('Category added');
   };
 }
-function openRuleModal(){
+function openRuleModal(index){
+  const isEdit = index!=null && index>=0;
+  const rule = isEdit ? DB.rules[index] : null;
   openModal(`
-    <div class="modal-head"><h3>Add auto-tagging rule</h3></div>
+    <div class="modal-head"><h3>${isEdit?'Edit':'Add'} auto-tagging rule</h3></div>
     <div class="modal-body">
       <div class="form-grid">
-        <div class="field span2"><label>If description contains</label><input type="text" id="r-kw" placeholder="e.g. TESCO"></div>
-        <div class="field span2"><label>Assign category</label><select id="r-cat">${categoryOptionsHTML('', {includeUncategorized:false})}</select></div>
+        <div class="field span2"><label>If description contains</label><input type="text" id="r-kw" value="${rule?escAttr(rule.keyword):''}" placeholder="e.g. TESCO"></div>
+        <div class="field span2"><label>Assign category</label><select id="r-cat">${categoryOptionsHTML(rule?rule.category:'', {includeUncategorized:false})}</select></div>
       </div>
     </div>
-    <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">Add rule</button></div>
+    <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">${isEdit?'Save changes':'Add rule'}</button></div>
   `);
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('m-save').onclick = ()=>{
     const kw = document.getElementById('r-kw').value.trim();
     const cat = document.getElementById('r-cat').value;
     if(!kw){ toast('Enter text to match', 'error'); return; }
-    DB.rules.unshift({keyword:kw, category:cat});
+    if(isEdit){
+      DB.rules[index] = {keyword:kw, category:cat};
+    } else {
+      DB.rules.unshift({keyword:kw, category:cat});
+    }
     const applied = applyRuleToUncategorised(kw, cat);
     scheduleSave(); closeModal(); renderCategories(document.getElementById('content')); renderSidebarBits();
-    toast(applied ? `Rule added — applied to ${applied} existing uncategorised transaction${applied===1?'':'s'}` : 'Rule added');
+    toast(applied ? `Rule ${isEdit?'updated':'added'} — applied to ${applied} existing uncategorised transaction${applied===1?'':'s'}` : `Rule ${isEdit?'updated':'added'}`);
   };
 }
 function applyRuleToUncategorised(keyword, category){
@@ -2812,23 +3111,58 @@ function renderImportStep3(body){
 function renderImportBody(){
   const st = UI.importState;
   const body = document.getElementById('import-body');
-  body.innerHTML = st.parsed.map(p=>`
-    <tr style="${p.duplicate?'opacity:.6':''}">
+  body.innerHTML = st.parsed.map(p=>{
+    const kind = categoryKind(p.category);
+    const stampClass = !p.category ? 'c-none' : (kind==='income' ? 'c-income' : 'c-expense');
+    return `<tr style="${p.duplicate?'opacity:.6':''}">
       <td><input type="checkbox" class="row-check" data-id="${p.rowId}" ${p.include?'checked':''} ${!p.date?'disabled':''}></td>
       <td>${p.date?ukDateShort(p.date):'<span style="color:var(--expense);font-size:11.5px;">invalid</span>'}</td>
       <td class="desc" title="${escAttr(p.description)}">${escHTML(p.description)} ${p.duplicate?'<span class="dup-flag">possible duplicate</span>':''}</td>
       <td class="amt ${p.amount>0?'income':''}">${gbp(p.amount,{signed:true})}</td>
-      <td><select class="cat-select-inline row-cat" data-id="${p.rowId}">${categoryOptionsHTML(p.category)}</select></td>
+      <td class="cat-cell"><span class="stamp ${stampClass} cat-badge-clickable" data-action="open-import-cat-picker" data-id="${p.rowId}" title="Click to change category">${escHTML(p.category || 'Uncategorised')}</span></td>
       <td></td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
   body.querySelectorAll('.row-check').forEach(cb=> cb.onchange = e=>{
     const p = st.parsed.find(x=>x.rowId===e.target.dataset.id); p.include = e.target.checked; updateSelCount();
   });
-  body.querySelectorAll('.row-cat').forEach(sel=> sel.onchange = e=>{
-    const p = st.parsed.find(x=>x.rowId===e.target.dataset.id); p.category = e.target.value;
+  body.querySelectorAll('[data-action="open-import-cat-picker"]').forEach(el=>{
+    el.addEventListener('click', ()=> openInlineImportCategoryPicker(el));
   });
   updateSelCount();
+}
+function openInlineImportCategoryPicker(badgeEl){
+  const st = UI.importState;
+  const rowId = badgeEl.dataset.id;
+  const p = st.parsed.find(x=>x.rowId===rowId);
+  if(!p) return;
+  const td = badgeEl.closest('td');
+  const sel = document.createElement('select');
+  sel.className = 'cat-select-inline';
+  sel.innerHTML = categoryOptionsHTML(p.category);
+  sel.value = p.category || '';
+  td.innerHTML = '';
+  td.appendChild(sel);
+  sel.focus();
+  let committed = false;
+  function commit(){
+    if(committed) return;
+    committed = true;
+    p.category = sel.value;
+    const kind = categoryKind(p.category);
+    const stampClass = !p.category ? 'c-none' : (kind==='income' ? 'c-income' : 'c-expense');
+    const badge = document.createElement('span');
+    badge.className = `stamp ${stampClass} cat-badge-clickable`;
+    badge.dataset.action = 'open-import-cat-picker';
+    badge.dataset.id = p.rowId;
+    badge.title = 'Click to change category';
+    badge.textContent = p.category || 'Uncategorised';
+    badge.addEventListener('click', ()=> openInlineImportCategoryPicker(badge));
+    td.innerHTML = '';
+    td.appendChild(badge);
+  }
+  sel.addEventListener('change', commit);
+  sel.addEventListener('blur', commit);
 }
 function updateSelCount(){
   const st = UI.importState;
@@ -3023,6 +3357,7 @@ function handleRestoreFile(file){
       accountStartingBalances: (parsed.accountStartingBalances && typeof parsed.accountStartingBalances==='object') ? parsed.accountStartingBalances : {},
       merchantAliases: (parsed.merchantAliases && typeof parsed.merchantAliases==='object') ? parsed.merchantAliases : {},
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
+      discretionaryCategories: Array.isArray(parsed.discretionaryCategories) ? parsed.discretionaryCategories : [],
     };
     const currentCount = DB.transactions.length;
     openModal(`
@@ -3072,6 +3407,7 @@ async function init(){
   if(!DB.accountStartingBalances) DB.accountStartingBalances = {};
   if(!DB.merchantAliases) DB.merchantAliases = {};
   if(!DB.accounts) DB.accounts = [];
+  if(!DB.discretionaryCategories) DB.discretionaryCategories = [];
   if(!loaded) scheduleSave();
 
   document.getElementById('nav').addEventListener('click', (e)=>{

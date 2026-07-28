@@ -1,22 +1,34 @@
 # Pocket Ledger
 
-A personal income & spending tracker: dashboard with weekly/monthly/yearly
-analytics, a balance-over-time chart, per-account balances (with a proper
+A personal income & spending tracker that runs entirely in your browser —
+your data is stored privately and nothing is sent to a server.
+
+**Dashboard:** weekly/monthly/yearly analytics, a balance-over-time chart
+with an optional trend-based forecast, a cash flow waterfall showing where
+income actually went each period, per-account balances (with a proper
 account list you can add to ahead of time), top merchants (with manual
-merging for near-duplicate names), budgets with progress bars, month-vs-month
-comparisons, a transactions log with bulk editing (search or filter, select
-several, then set their account or category in one go), proper transfers
-between your own accounts — either recorded directly or converted from an
-existing transaction, with a one-click revert if it's tagged as a transfer
-by mistake — so moving money from savings to current doesn't get
-counted as income or spending, an "exclude from totals" option for real
-money that hits your account but isn't really yours to spend (e.g. an
-earmarked payment from a parent), bank statement (CSV) import with category
-assignment, category/rule management, and a Spending Plan that auto-detects
-your recurring bills/income (or estimates them from category history when
-the transactions vary too much to match automatically), shows what's coming
-up, and weighs planned purchases against what you can actually afford. All
-your data is stored privately — nothing is sent to a server.
+merging for near-duplicate names), budgets with progress bars,
+"savings opportunities" that flag discretionary categories running above
+your usual spending, and month-vs-month comparisons.
+
+**Transactions:** a log with bulk editing (search or filter, select several,
+then set their account or category in one go), proper transfers between
+your own accounts — recorded directly or converted from an existing
+transaction, with a one-click revert if it's tagged as a transfer by
+mistake — so moving money from savings to current doesn't get counted as
+income or spending, and an "exclude from totals" option for real money that
+hits your account but isn't really yours to spend (e.g. an earmarked
+payment from a parent).
+
+**Import & categorisation:** bank statement (CSV) import with category
+assignment, editable category/auto-tagging rules with a one-click "re-check
+all" that fixes mislabelled transactions to match your current rules (not
+just blank ones, and scoped to your current filters if you have any set).
+
+**Spending Plan:** auto-detects your recurring bills/income (or estimates
+them from category history when the transactions vary too much to match
+automatically), shows what's coming up, and weighs planned purchases
+against what you can actually afford.
 
 ## Files
 
