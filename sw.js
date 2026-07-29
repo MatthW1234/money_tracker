@@ -2,15 +2,16 @@
 // The app shell (index.html, manifest.json, icon.svg) is fetched network-first,
 // so pushing an update to your repo shows up the next time you open the app
 // while you're online — the cache is only a fallback for when you're offline.
-// The CDN libraries (Chart.js, PapaParse) change rarely, so those are cached
+// The vendor libraries (Chart.js, PapaParse) are now shipped locally rather
+// than pulled from a CDN, so they're just ordinary same-origin files — cached
 // first for speed and only re-checked in the background.
 // Your data itself is not cached here — that's handled by the app's own storage.
 
-const CACHE = 'pocket-ledger-v3';
+const CACHE = 'pocket-ledger-v4';
 const APP_SHELL = ['./', './index.html', './manifest.json', './icon.svg'];
 const VENDOR = [
-  'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js',
-  'https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js',
+  './vendor/chart.umd.min.js',
+  './vendor/papaparse.min.js',
 ];
 
 self.addEventListener('install', (event) => {

@@ -36,6 +36,28 @@ against what you can actually afford.
 - `manifest.json` — PWA manifest (name, icon, theme colour)
 - `sw.js` — service worker (offline caching of the app shell)
 - `icon.svg` — app icon
+- `vendor/chart.umd.min.js`, `vendor/papaparse.min.js` — Chart.js and
+  PapaParse, vendored locally rather than loaded from a CDN, so the app
+  isn't trusting a third party to serve unmodified JS into a page that
+  holds your bank data. Upload the whole `vendor` folder along with the
+  files above.
+
+## Security notes
+
+- The app sets a strict Content-Security-Policy and loads no third-party
+  scripts at runtime — everything it needs ships in these files.
+- Optional **app lock**: in Settings → App lock, you can set a PIN that's
+  required before the app opens on a given device. This is a screen lock,
+  not encryption — your data is still plain JSON in the browser's local
+  storage either way, which is what lets "Forgot PIN?" recover access
+  without losing anything. It stops someone picking up your unlocked
+  phone and opening the app; it doesn't stop someone opening dev tools on
+  the device itself.
+- Your data never leaves the device — there's no server, no analytics,
+  no network calls other than loading the app files themselves.
+- Backups (**Export backup**) are unencrypted JSON. Treat that file like
+  a bank statement: don't commit it into a repo, and be mindful of where
+  it lands if it syncs to cloud storage.
 
 ## Using it inside Claude
 
@@ -48,12 +70,13 @@ installing apps served from a real website).
 ## Installing it as a real app on your phone
 
 To get the full PWA experience — an icon on your home screen, opening in
-its own window, working offline — host all four files above together on
-any static web host, for example:
+its own window, working offline — host all the files above (including the
+`vendor` folder) together on any static web host, for example:
 
-1. **GitHub Pages** (free): create a repo, upload the four files, enable
-   Pages in the repo settings, then visit the URL it gives you.
-2. **Netlify / Vercel** (free): drag the folder containing the four files
+1. **GitHub Pages** (free): create a repo, upload the files keeping the
+   `vendor` folder structure intact, enable Pages in the repo settings,
+   then visit the URL it gives you.
+2. **Netlify / Vercel** (free): drag the folder containing all the files
    onto their dashboard.
 
 Once it's live on a real `https://` URL:

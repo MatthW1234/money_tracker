@@ -11,8 +11,12 @@
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+<!-- Chart.js and PapaParse are vendored locally in vendor/ rather than loaded from a CDN,
+     so a compromised or tampered third-party file can't run inside an app that holds your
+     bank transaction data. Keep these in sync if you ever bump versions. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
+<script src="vendor/chart.umd.min.js"></script>
+<script src="vendor/papaparse.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -66,6 +70,30 @@ a{ color:inherit; }
 .num{ font-family:var(--font-mono); font-variant-numeric:tabular-nums; letter-spacing:-0.01em; }
 .hidden{ display:none !important; }
 .visually-hidden{ position:absolute; width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0); }
+
+/* ---------- App lock screen ---------- */
+.lock-screen{
+  position:fixed; inset:0; z-index:200; background:var(--bg);
+  display:flex; align-items:center; justify-content:center; padding:20px;
+}
+.lock-card{
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-lg); width:100%; max-width:340px; padding:28px 26px; text-align:center;
+}
+.lock-card h2{ font-family:var(--font-display); font-size:22px; font-weight:600; margin:0 0 4px; }
+.lock-card p{ color:var(--ink-soft); font-size:13px; margin:0 0 18px; }
+.lock-pin-input{
+  width:100%; text-align:center; letter-spacing:.4em; font-family:var(--font-mono); font-size:20px;
+  border:1px solid var(--line-strong); background:var(--surface-2); border-radius:9px;
+  padding:12px; margin-bottom:10px;
+}
+.lock-error{ color:var(--expense); font-size:12.5px; min-height:16px; margin-bottom:10px; }
+.lock-card .btn{ width:100%; justify-content:center; margin-bottom:8px; }
+.btn-link{
+  background:none; border:none; box-shadow:none; color:var(--ink-faint);
+  font-size:12px; font-weight:600; text-decoration:underline; padding:4px;
+}
+.btn-link:hover{ color:var(--ink-soft); }
 
 /* ---------- Storage warning banner ---------- */
 #storage-warning{
@@ -270,7 +298,7 @@ td.row-actions{ text-align:right; white-space:nowrap; }
 .filters-row{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; align-items:center; }
 .field{ display:flex; flex-direction:column; gap:4px; }
 .field label{ font-size:11px; font-weight:600; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.05em; }
-input[type=text], input[type=date], input[type=number], input[type=file], select, textarea{
+input[type=text], input[type=date], input[type=number], input[type=file], input[type=password], select, textarea{
   border:1px solid var(--line-strong); background:var(--surface); border-radius:8px;
   padding:8px 11px; font-size:13px; color:var(--ink);
 }
@@ -439,6 +467,17 @@ textarea{ resize:vertical; min-height:60px; }
 </style>
 </head>
 <body>
+
+<div id="lock-screen" class="lock-screen hidden">
+  <div class="lock-card">
+    <h2>Pocket Ledger</h2>
+    <p id="lock-card-sub">Enter your PIN to continue</p>
+    <input type="password" inputmode="numeric" autocomplete="off" class="lock-pin-input" id="lock-pin-input" maxlength="12" placeholder="••••">
+    <div class="lock-error" id="lock-error"></div>
+    <button class="btn btn-primary" id="lock-unlock-btn">Unlock</button>
+    <button class="btn-link" id="lock-forgot-btn">Forgot PIN? Remove app lock</button>
+  </div>
+</div>
 
 <div id="storage-warning" class="hidden">
   <div class="storage-warning-inner">
@@ -682,6 +721,92 @@ async function loadDB(){
     }
   }catch(e){ /* key not found, storage unavailable, or corrupt JSON */ }
   return null;
+}
+
+/* ---------- App lock (PIN gate) ----------
+   This is a screen lock, not encryption: your data still sits as plain JSON
+   in localStorage either way (that's what lets "Forgot PIN?" recover it
+   without losing anything). What this protects against is someone picking
+   up your unlocked phone/laptop and opening the installed app — it does not
+   protect against someone opening browser dev tools on the device itself. */
+const LOCK_KEY = 'pocketledger_lock_v1';
+const LOCK_SUPPORTED = !!(window.crypto && window.crypto.subtle && window.localStorage);
+
+function randomSaltHex(){
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function sha256Hex(str){
+  const buf = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf), b=>b.toString(16).padStart(2,'0')).join('');
+}
+function getLockConfig(){
+  if(!LOCK_SUPPORTED) return null;
+  try{
+    const raw = window.localStorage.getItem(LOCK_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+function isLockEnabled(){
+  const cfg = getLockConfig();
+  return !!(cfg && cfg.hash && cfg.salt);
+}
+async function setPin(pin){
+  const salt = randomSaltHex();
+  const hash = await sha256Hex(salt + pin);
+  window.localStorage.setItem(LOCK_KEY, JSON.stringify({salt, hash}));
+}
+function removeLock(){
+  window.localStorage.removeItem(LOCK_KEY);
+}
+async function verifyPin(pin){
+  const cfg = getLockConfig();
+  if(!cfg) return true;
+  const hash = await sha256Hex(cfg.salt + pin);
+  return hash === cfg.hash;
+}
+
+let lockScreenWired = false;
+function showLockScreen(){
+  document.getElementById('app').classList.add('hidden');
+  const screen = document.getElementById('lock-screen');
+  screen.classList.remove('hidden');
+  const input = document.getElementById('lock-pin-input');
+  input.value = '';
+  document.getElementById('lock-error').textContent = '';
+  setTimeout(()=> input.focus(), 50);
+  if(!lockScreenWired){
+    lockScreenWired = true;
+    const tryUnlock = async ()=>{
+      const ok = await verifyPin(input.value);
+      if(ok){ hideLockScreen(); }
+      else{
+        document.getElementById('lock-error').textContent = 'Incorrect PIN — try again';
+        input.value = ''; input.focus();
+      }
+    };
+    document.getElementById('lock-unlock-btn').onclick = tryUnlock;
+    input.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') tryUnlock(); });
+    document.getElementById('lock-forgot-btn').onclick = ()=>{
+      document.getElementById('lock-card-sub').textContent =
+        'Removing the app lock does not delete any of your data — it just turns the PIN screen off. You can set a new PIN afterwards from Settings.';
+      document.getElementById('lock-unlock-btn').textContent = 'Remove app lock and continue';
+      document.getElementById('lock-pin-input').classList.add('hidden');
+      document.getElementById('lock-error').textContent = '';
+      document.getElementById('lock-forgot-btn').classList.add('hidden');
+      document.getElementById('lock-unlock-btn').onclick = ()=>{ removeLock(); hideLockScreen(); };
+    };
+  }
+}
+function hideLockScreen(){
+  document.getElementById('lock-screen').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  startApp();
+}
+function lockNow(){
+  if(!isLockEnabled()) return;
+  showLockScreen();
 }
 
 /* ---------- formatting ---------- */
@@ -3258,6 +3383,74 @@ function renderAccountManagerBody(){
     };
   });
 }
+function renderAppLockBody(){
+  const host = document.getElementById('app-lock-body');
+  if(!host) return;
+
+  if(!LOCK_SUPPORTED){
+    host.innerHTML = `<p style="font-size:11.5px;color:var(--ink-faint);margin:0;">App lock isn't available in this browser.</p>`;
+    return;
+  }
+
+  if(isLockEnabled()){
+    host.innerHTML = `
+      <p style="font-size:11.5px;color:var(--ink-faint);margin:0 0 10px;">A PIN is required to open this app.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-sm" id="lock-lock-now">Lock now</button>
+        <button class="btn btn-sm" id="lock-change">Change PIN</button>
+        <button class="btn btn-sm btn-danger" id="lock-turn-off">Turn off app lock</button>
+      </div>`;
+    document.getElementById('lock-lock-now').onclick = ()=>{ closeModal(); lockNow(); };
+    document.getElementById('lock-change').onclick = ()=> renderAppLockSetForm(host, true);
+    document.getElementById('lock-turn-off').onclick = ()=>{
+      openModal(`
+        <div class="modal-head"><h3>Turn off app lock?</h3></div>
+        <div class="modal-body"><p style="margin:0;color:var(--ink-soft);font-size:13px;">Anyone who opens this app on this device will see your data without entering a PIN. Your transactions themselves are not affected.</p></div>
+        <div class="modal-foot"><button class="btn" id="m-cancel4">Cancel</button><button class="btn btn-danger" id="m-confirm4">Turn off app lock</button></div>
+      `);
+      document.getElementById('m-cancel4').onclick = closeModal;
+      document.getElementById('m-confirm4').onclick = ()=>{
+        removeLock(); closeModal(); toast('App lock turned off');
+      };
+    };
+    return;
+  }
+
+  renderAppLockSetForm(host, false);
+}
+function renderAppLockSetForm(host, isChange){
+  host.innerHTML = `
+    <p style="font-size:11.5px;color:var(--ink-faint);margin:0 0 10px;">
+      ${isChange ? 'Choose a new PIN.' : 'Require a PIN before this app opens on this device. This is a screen lock, not encryption — see the note on the lock screen for what it does and doesn\u2019t protect against.'}
+    </p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+      <div class="field" style="width:120px;">
+        <label>New PIN</label>
+        <input type="password" inputmode="numeric" id="lock-new-pin" maxlength="12" placeholder="4+ digits">
+      </div>
+      <div class="field" style="width:120px;">
+        <label>Confirm</label>
+        <input type="password" inputmode="numeric" id="lock-new-pin-confirm" maxlength="12">
+      </div>
+      <button class="btn btn-primary btn-sm" id="lock-save-pin">${isChange ? 'Save new PIN' : 'Set PIN'}</button>
+      ${isChange ? `<button class="btn btn-sm" id="lock-cancel-change">Cancel</button>` : ''}
+    </div>
+    <div class="lock-error" id="lock-set-error" style="margin-top:8px;"></div>
+  `;
+  if(isChange){
+    document.getElementById('lock-cancel-change').onclick = renderAppLockBody;
+  }
+  document.getElementById('lock-save-pin').onclick = async ()=>{
+    const pin = document.getElementById('lock-new-pin').value;
+    const confirm = document.getElementById('lock-new-pin-confirm').value;
+    const errEl = document.getElementById('lock-set-error');
+    if(pin.length < 4){ errEl.textContent = 'Use at least 4 digits'; return; }
+    if(pin !== confirm){ errEl.textContent = 'PINs don\u2019t match'; return; }
+    await setPin(pin);
+    renderAppLockBody();
+    toast(isChange ? 'PIN changed' : 'App lock turned on');
+  };
+}
 function openSettingsModal(){
   openModal(`
     <div class="modal-head"><h3>Settings</h3></div>
@@ -3275,6 +3468,10 @@ function openSettingsModal(){
         </div>
         <div id="account-manager-body"></div>
       </div>
+      <div style="border-top:1px solid var(--line); padding-top:14px; margin-bottom:14px;">
+        <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">App lock</div>
+        <div id="app-lock-body"></div>
+      </div>
       <div style="border-top:1px solid var(--line); padding-top:16px; display:flex; flex-direction:column; gap:8px;">
         <button class="btn" id="s-restore">Restore from backup…</button>
         <input type="file" id="s-restore-file" accept=".json,application/json" class="hidden">
@@ -3286,6 +3483,7 @@ function openSettingsModal(){
     <div class="modal-foot"><button class="btn" id="m-cancel">Close</button><button class="btn btn-primary" id="m-save">Save</button></div>
   `);
   renderAccountManagerBody();
+  renderAppLockBody();
   document.getElementById('add-account-btn').onclick = ()=>{
     const input = document.getElementById('new-account-name');
     const name = input.value.trim();
@@ -3395,6 +3593,26 @@ function exportBackup(){
 /* =========================================================
    INIT
    ========================================================= */
+let appStarted = false;
+function startApp(){
+  if(appStarted) return;
+  appStarted = true;
+
+  document.getElementById('nav').addEventListener('click', (e)=>{
+    const b = e.target.closest('.nav-item'); if(!b) return;
+    setTab(b.dataset.tab);
+  });
+  document.getElementById('btn-settings').onclick = openSettingsModal;
+  document.getElementById('btn-export').onclick = exportBackup;
+
+  setTab('dashboard');
+
+  // Register service worker if this file is being served from a real origin
+  // (this silently does nothing inside a sandboxed preview — that's expected).
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('sw.js').catch(()=>{ /* not hosted standalone — fine */ });
+  }
+}
 async function init(){
   checkStorageHealth();
 
@@ -3410,19 +3628,11 @@ async function init(){
   if(!DB.discretionaryCategories) DB.discretionaryCategories = [];
   if(!loaded) scheduleSave();
 
-  document.getElementById('nav').addEventListener('click', (e)=>{
-    const b = e.target.closest('.nav-item'); if(!b) return;
-    setTab(b.dataset.tab);
-  });
-  document.getElementById('btn-settings').onclick = openSettingsModal;
-  document.getElementById('btn-export').onclick = exportBackup;
-
-  setTab('dashboard');
-
-  // Register service worker if this file is being served from a real origin
-  // (this silently does nothing inside a sandboxed preview — that's expected).
-  if('serviceWorker' in navigator){
-    navigator.serviceWorker.register('sw.js').catch(()=>{ /* not hosted standalone — fine */ });
+  if(isLockEnabled()){
+    showLockScreen();
+    // startApp() runs the first time hideLockScreen() succeeds — see below.
+  } else {
+    startApp();
   }
 }
 function checkStorageHealth(){
