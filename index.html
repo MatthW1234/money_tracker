@@ -830,6 +830,20 @@ function ukDateShort(iso){
   if(isNaN(d)) return iso;
   return d.toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
 }
+function timeAgoLabel(iso){
+  const then = new Date(iso);
+  if(isNaN(then)) return '';
+  const ms = Date.now() - then.getTime();
+  const mins = Math.floor(ms / 60000);
+  if(mins < 1) return 'just now';
+  if(mins < 60) return `${mins} minute${mins===1?'':'s'} ago`;
+  const hours = Math.floor(mins / 60);
+  if(hours < 24) return `${hours} hour${hours===1?'':'s'} ago`;
+  const days = Math.floor(hours / 24);
+  if(days === 1) return 'yesterday';
+  if(days < 7) return `${days} days ago`;
+  return then.toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric'});
+}
 function monthLabel(key){
   const [y,m] = key.split('-');
   const d = new Date(parseInt(y), parseInt(m)-1, 1);
@@ -2958,9 +2972,16 @@ function renderWizardStep(){
 }
 
 function renderImportStep1(body){
+  const li = DB.lastImport;
+  const lastImportNote = li ? `
+    <div class="last-import-note" style="background:var(--surface-2); border:1px solid var(--line); border-radius:var(--radius); padding:12px 14px; margin-bottom:16px; font-size:12.5px; color:var(--ink-soft); line-height:1.6;">
+      <strong style="color:var(--ink);">Last import:</strong> ${timeAgoLabel(li.timestamp)} — ${li.count} transaction${li.count===1?'':'s'} from "${escHTML(li.fileName)}"
+      ${li.lastTx ? `<br><strong style="color:var(--ink);">Most recent transaction:</strong> ${ukDate(li.lastTx.date)} · ${escHTML(li.lastTx.description)} · ${gbp(li.lastTx.amount)}` : ''}
+    </div>` : '';
   body.innerHTML = `
     <div class="panel">
       <div class="panel-head"><div class="panel-title">Upload your bank statement<small>Exported as CSV from online banking — Santander and most UK banks work the same way</small></div></div>
+      ${lastImportNote}
       <div class="dropzone" id="dropzone">
         ${iconUpload()}
         <p><strong>Drag and drop a CSV file here</strong>, or</p>
@@ -3048,7 +3069,7 @@ function renderImportStep2(body){
   const opts = (sel)=> `<option value="">— not in file —</option>` + st.headers.map(h=>`<option value="${escAttr(h)}" ${h===sel?'selected':''}>${escHTML(h)}</option>`).join('');
   body.innerHTML = `
     <div class="panel">
-      <div class="panel-head"><div class="panel-title">Match your columns<small>${st.fileName} · ${st.rows.length} rows · we've guessed based on your headers</small></div></div>
+      <div class="panel-head"><div class="panel-title">Match your columns<small>${escHTML(st.fileName)} · ${st.rows.length} rows · we've guessed based on your headers</small></div></div>
       <div class="mapping-grid">
         <div class="field"><label>Date column</label><select id="map-date">${opts(st.mapping.date)}</select></div>
         <div class="field"><label>Date format</label><select id="map-dateformat">
@@ -3318,6 +3339,13 @@ function confirmImport(){
     }
   });
   DB.transactions.sort((a,b)=> a.date.localeCompare(b.date));
+  const mostRecent = toImport.reduce((best,p)=> (!best || p.date > best.date) ? p : best, null);
+  DB.lastImport = {
+    timestamp: new Date().toISOString(),
+    fileName: st.fileName,
+    count: toImport.length,
+    lastTx: mostRecent ? {date: mostRecent.date, description: mostRecent.description, amount: mostRecent.amount} : null,
+  };
   scheduleSave();
   st.step = 4;
   st.importedCount = toImport.length;
@@ -3626,6 +3654,7 @@ async function init(){
   if(!DB.merchantAliases) DB.merchantAliases = {};
   if(!DB.accounts) DB.accounts = [];
   if(!DB.discretionaryCategories) DB.discretionaryCategories = [];
+  if(DB.lastImport === undefined) DB.lastImport = null;
   if(!loaded) scheduleSave();
 
   if(isLockEnabled()){
