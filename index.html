@@ -1325,7 +1325,7 @@ function renderDashboard(c){
 
     <div class="panel" style="margin-top:16px;">
       <div class="panel-head"><div class="panel-title">Cash flow<small>${range.label} · where income actually went</small></div></div>
-      <div class="chart-wrap"><div id="cashflow-sankey" style="width:100%;height:100%;"></div></div>
+      <div style="position:relative;height:440px;"><div id="cashflow-sankey" style="width:100%;height:100%;"></div></div>
     </div>
 
     <div class="grid-2" style="margin-top:16px;">
@@ -1774,16 +1774,33 @@ function drawCashFlowChart(list, income){
   }
 
   const total = validBuckets.reduce((s,b)=>s+b.value,0);
-  const W = 680, H = 260;
-  const padTop = 14, leftX = 96, nodeW = 14, rightX = 470;
+  const W = 700, H = 420;
+  const padTop = 16, leftX = 110, nodeW = 14, rightX = 480;
   const usableH = H - padTop*2;
-  const gap = 7;
-  const scale = (usableH - gap*(validBuckets.length-1)) / total;
+  const gap = 12;
+  const totalGap = gap*(validBuckets.length-1);
+  const availForNodes = usableH - totalGap;
+
+  // Guarantee every node at least enough height for its two-line label,
+  // regardless of how small its value is relative to the others — otherwise
+  // a long tail of minor categories all get squeezed into a few px and their
+  // labels pile up on top of each other. Nodes needing the floor take it;
+  // whatever height remains is distributed proportionally among the rest.
+  const minNodeH = 30;
+  let heights = validBuckets.map(b=> b.value/total*availForNodes);
+  for(let pass=0; pass<validBuckets.length; pass++){
+    const flooredIdx = new Set(heights.map((h,i)=> h<minNodeH ? i : -1).filter(i=>i>=0));
+    if(!flooredIdx.size) break;
+    const flooredTotal = flooredIdx.size*minNodeH;
+    const remainingH = Math.max(0, availForNodes - flooredTotal);
+    const remainingValue = validBuckets.reduce((s,b,i)=> flooredIdx.has(i) ? s : s+b.value, 0);
+    heights = validBuckets.map((b,i)=> flooredIdx.has(i) ? minNodeH : (remainingValue>0 ? b.value/remainingValue*remainingH : 0));
+  }
 
   let leftCursor = padTop, rightCursor = padTop;
   const ribbons = [], rightNodes = [];
-  validBuckets.forEach(b=>{
-    const bh = Math.max(2, b.value*scale);
+  validBuckets.forEach((b,i)=>{
+    const bh = heights[i];
     ribbons.push({y1:leftCursor, h1:bh, y2:rightCursor, h2:bh, color:b.color});
     rightNodes.push({y:rightCursor, h:bh, label:b.label, value:b.value, color:b.color});
     leftCursor += bh;
@@ -1796,12 +1813,12 @@ function drawCashFlowChart(list, income){
     <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:100%;" preserveAspectRatio="xMidYMid meet">
       ${ribbons.map(r=> `<path d="${sankeyRibbonPath(leftX+nodeW, r.y1, r.h1, rightX, r.y2, r.h2)}" fill="${r.color}" opacity="0.28"></path>`).join('')}
       <rect x="${leftX}" y="${padTop}" width="${nodeW}" height="${leftTotalH}" rx="3" fill="var(--ink)"></rect>
-      <text x="${leftX-8}" y="${leftMidY-6}" text-anchor="end" font-size="12" font-weight="600" fill="var(--ink)">Income</text>
-      <text x="${leftX-8}" y="${leftMidY+10}" text-anchor="end" font-size="11" fill="var(--ink-faint)">${escHTML(gbp(income))}</text>
+      <text x="${leftX-8}" y="${leftMidY-6}" text-anchor="end" font-size="13" font-weight="600" fill="var(--ink)">Income</text>
+      <text x="${leftX-8}" y="${leftMidY+11}" text-anchor="end" font-size="12" fill="var(--ink-faint)">${escHTML(gbp(income))}</text>
       ${rightNodes.map(n=> `
         <rect x="${rightX}" y="${n.y}" width="${nodeW}" height="${n.h}" rx="3" fill="${n.color}"></rect>
-        <text x="${rightX+nodeW+8}" y="${n.y+n.h/2-4}" font-size="12" font-weight="600" fill="var(--ink)">${escHTML(n.label)}</text>
-        <text x="${rightX+nodeW+8}" y="${n.y+n.h/2+12}" font-size="11" fill="var(--ink-faint)">${escHTML(gbp(n.value))}</text>
+        <text x="${rightX+nodeW+10}" y="${n.y+n.h/2-4}" font-size="13" font-weight="600" fill="var(--ink)">${escHTML(n.label)}</text>
+        <text x="${rightX+nodeW+10}" y="${n.y+n.h/2+13}" font-size="12" fill="var(--ink-faint)">${escHTML(gbp(n.value))}</text>
       `).join('')}
     </svg>
     ${net<-0.005 ? `<p style="font-size:11.5px;color:var(--expense);font-weight:600;margin:8px 2px 0;">Spending exceeded income this period by ${gbp(Math.abs(net))} — a diagram can't show a negative flow, so that shortfall isn't pictured above.</p>` : ''}
