@@ -356,6 +356,11 @@ textarea{ resize:vertical; min-height:60px; }
   animation:toast-in .2s ease;
 }
 .toast.error{ background:#7A2A22; }
+.toast-action{
+  background:none; border:1px solid rgba(255,255,255,.45); color:#fff; border-radius:6px;
+  padding:4px 10px; font-size:12px; font-weight:600; cursor:pointer; flex-shrink:0; white-space:nowrap;
+}
+.toast-action:hover{ background:rgba(255,255,255,.12); }
 @keyframes toast-in{ from{ opacity:0; transform:translateY(8px); } to{ opacity:1; transform:translateY(0); } }
 
 /* ---------- Categories tab ---------- */
@@ -1123,13 +1128,31 @@ function escHTML(s){ return String(s??'').replace(/[&<>"']/g, m=>({ '&':'&amp;',
 function escAttr(s){ return escHTML(s); }
 
 /* ---------- toast ---------- */
-function toast(msg, type){
+function toast(msg, type, opts){
+  opts = opts || {};
   const host = document.getElementById('toast-host');
   const el = document.createElement('div');
   el.className = 'toast' + (type==='error' ? ' error' : '');
-  el.textContent = msg;
+  const span = document.createElement('span');
+  span.style.flex = '1';
+  span.textContent = msg;
+  el.appendChild(span);
+  let dismissed = false;
+  function dismiss(){
+    if(dismissed) return;
+    dismissed = true;
+    el.style.opacity='0'; el.style.transition='opacity .25s'; setTimeout(()=>el.remove(),250);
+  }
+  if(opts.actionLabel && opts.onAction){
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toast-action';
+    btn.textContent = opts.actionLabel;
+    btn.onclick = ()=>{ dismiss(); opts.onAction(); };
+    el.appendChild(btn);
+  }
   host.appendChild(el);
-  setTimeout(()=>{ el.style.opacity='0'; el.style.transition='opacity .25s'; setTimeout(()=>el.remove(),250); }, 2600);
+  setTimeout(dismiss, opts.duration || 2600);
 }
 
 /* ---------- modal ---------- */
@@ -1166,7 +1189,32 @@ const UI = {
   charts: {},
   importState: null,
   investPeriod: 'month',
+  lastUndo: null,
 };
+
+// Generic one-shot undo for bulk actions. Only the most recent bulk action
+// is remembered — a fresh one simply replaces it rather than building a full
+// history stack, which keeps this simple and matches what the "Undo" toast
+// button can realistically offer anyway (undoing three actions ago via a
+// toast that's long since disappeared isn't a real workflow).
+function pushUndo(label, restoreFn){
+  UI.lastUndo = {label, restore:restoreFn};
+}
+function offerUndo(message){
+  if(!UI.lastUndo) { toast(message); return; }
+  const label = UI.lastUndo.label;
+  toast(message, null, {
+    actionLabel: 'Undo',
+    duration: 7000,
+    onAction: ()=>{
+      if(!UI.lastUndo) return;
+      UI.lastUndo.restore();
+      UI.lastUndo = null;
+      scheduleSave(); renderContent(); renderSidebarBits();
+      toast(`Undone: ${label}`);
+    },
+  });
+}
 
 const NAV_ICONS_TITLE = {
   dashboard: ['Dashboard','All figures update automatically from your transactions.'],
@@ -2045,21 +2093,27 @@ function renderBulkToolbar(){
     const val = document.getElementById('bulk-account-input').value.trim();
     if(!val){ toast('Enter an account name', 'error'); return; }
     let count = 0;
+    const before = [];
     UI.txSelected.forEach(id=>{
       const t = DB.transactions.find(x=>x.id===id);
-      if(t && !t.transferId){ t.account = val; count++; }
+      if(t && !t.transferId){ before.push({id:t.id, account:t.account}); t.account = val; count++; }
+    });
+    pushUndo(`set account to "${val}" for ${count} transaction${count===1?'':'s'}`, ()=>{
+      before.forEach(b=>{ const t = DB.transactions.find(x=>x.id===b.id); if(t) t.account = b.account; });
     });
     scheduleSave(); UI.txSelected.clear(); renderTxBody(); renderSidebarBits();
-    toast(`Set account to "${val}" for ${count} transaction${count===1?'':'s'}`);
+    offerUndo(`Set account to "${val}" for ${count} transaction${count===1?'':'s'}`);
   };
   document.getElementById('bulk-category-apply').onclick = ()=>{
     const val = document.getElementById('bulk-category-select').value;
     const alsoLearn = document.getElementById('bulk-remember-rules').checked;
     let count = 0;
     const learned = [];
+    const before = [];
     UI.txSelected.forEach(id=>{
       const t = DB.transactions.find(x=>x.id===id);
       if(t && !t.transferId && !(t.splits&&t.splits.length)){
+        before.push({id:t.id, category:t.category});
         t.category = val;
         count++;
         if(alsoLearn){
@@ -2068,11 +2122,15 @@ function renderBulkToolbar(){
         }
       }
     });
+    pushUndo(`set category to "${val}" for ${count} transaction${count===1?'':'s'}`, ()=>{
+      before.forEach(b=>{ const t = DB.transactions.find(x=>x.id===b.id); if(t) t.category = b.category; });
+      learned.forEach(r=>{ DB.rules = DB.rules.filter(x=> !(x.keyword===r.keyword && x.category===r.category)); });
+    });
     scheduleSave(); UI.txSelected.clear(); renderTxBody(); renderSidebarBits();
     if(alsoLearn && learned.length){
-      toast(`Set category for ${count} transaction${count===1?'':'s'} — learned ${learned.length} new rule${learned.length===1?'':'s'} (e.g. "${learned[0].keyword}" → ${learned[0].category})`);
+      offerUndo(`Set category for ${count} transaction${count===1?'':'s'} — learned ${learned.length} new rule${learned.length===1?'':'s'} (e.g. "${learned[0].keyword}" → ${learned[0].category})`);
     } else {
-      toast(`Set category for ${count} transaction${count===1?'':'s'}`);
+      offerUndo(`Set category for ${count} transaction${count===1?'':'s'}`);
     }
   };
 }
@@ -2481,13 +2539,20 @@ function openSplitModal(id){
 
 function autoCategoriseAll(){
   let count = 0;
+  const before = [];
   DB.transactions.forEach(t=>{
     if(!t.category && !t.transferId && !(t.splits&&t.splits.length)){
       const s = suggestCategory(t.description, t.amount);
-      if(s){ t.category = s; count++; }
+      if(s){ before.push({id:t.id}); t.category = s; count++; }
     }
   });
-  if(count){ scheduleSave(); renderContent(); toast(`Auto-categorised ${count} transaction${count===1?'':'s'}`); }
+  if(count){
+    pushUndo(`auto-categorise ${count} transaction${count===1?'':'s'}`, ()=>{
+      before.forEach(b=>{ const t = DB.transactions.find(x=>x.id===b.id); if(t) t.category=''; });
+    });
+    scheduleSave(); renderContent();
+    offerUndo(`Auto-categorised ${count} transaction${count===1?'':'s'}`);
+  }
   else toast('No matching rules for your uncategorised transactions');
 }
 function reapplyRulesToAll(){
@@ -2499,7 +2564,7 @@ function reapplyRulesToAll(){
     if(t.transferId || (t.splits&&t.splits.length)) return;
     const suggested = suggestCategory(t.description, t.amount);
     if(suggested && suggested !== t.category){
-      changes.push({id:t.id, description:t.description, from:t.category||'Uncategorised', to:suggested});
+      changes.push({id:t.id, description:t.description, prevCategory:t.category, from:t.category||'Uncategorised', to:suggested});
     }
   });
   const scopeLabel = isFiltered ? `within your current filters (${scope.length} transaction${scope.length===1?'':'s'} matched)` : `across all ${scope.length} transactions`;
@@ -2521,8 +2586,11 @@ function reapplyRulesToAll(){
       const t = DB.transactions.find(x=>x.id===c.id);
       if(t) t.category = c.to;
     });
+    pushUndo(`re-check ${changes.length} transaction${changes.length===1?'':'s'}`, ()=>{
+      changes.forEach(c=>{ const t = DB.transactions.find(x=>x.id===c.id); if(t) t.category = c.prevCategory; });
+    });
     scheduleSave(); closeModal(); renderContent();
-    toast(`Updated ${changes.length} transaction${changes.length===1?'':'s'}`);
+    offerUndo(`Updated ${changes.length} transaction${changes.length===1?'':'s'}`);
   };
 }
 
@@ -2609,9 +2677,13 @@ function openDuplicatesModal(){
   document.getElementById('m-confirm').onclick = ()=>{
     const ids = Array.from(host.querySelectorAll('.dupe-check:checked')).map(cb=>cb.dataset.id);
     if(!ids.length){ toast('Nothing selected', 'error'); return; }
+    const deleted = DB.transactions.filter(t=>ids.includes(t.id)).map(t=> JSON.parse(JSON.stringify(t)));
     DB.transactions = DB.transactions.filter(t=>!ids.includes(t.id));
+    pushUndo(`delete ${ids.length} duplicate transaction${ids.length===1?'':'s'}`, ()=>{
+      DB.transactions.push(...deleted);
+    });
     scheduleSave(); closeModal(); renderContent(); renderSidebarBits();
-    toast(`Deleted ${ids.length} duplicate transaction${ids.length===1?'':'s'}`);
+    offerUndo(`Deleted ${ids.length} duplicate transaction${ids.length===1?'':'s'}`);
   };
 }
 
@@ -3419,6 +3491,20 @@ function openCategoryModal(){
     scheduleSave(); closeModal(); renderContent(); toast('Category added');
   };
 }
+function ruleMatchPreview(keyword, direction){
+  const kw = (keyword||'').trim().toUpperCase();
+  if(!kw) return {total:0, uncategorised:0, examples:[]};
+  const matches = DB.transactions.filter(t=>{
+    if(t.transferId) return false;
+    if(!t.description.toUpperCase().includes(kw)) return false;
+    if(direction==='out' && !(t.amount<0)) return false;
+    if(direction==='in' && !(t.amount>0)) return false;
+    return true;
+  });
+  const uncategorised = matches.filter(t=> !t.category && !(t.splits&&t.splits.length)).length;
+  const examples = matches.slice(0,3).map(t=>t.description);
+  return {total:matches.length, uncategorised, examples};
+}
 function openRuleModal(index){
   const isEdit = index!=null && index>=0;
   const rule = isEdit ? DB.rules[index] : null;
@@ -3438,10 +3524,35 @@ function openRuleModal(index){
           </select>
           <p style="font-size:11px;color:var(--ink-faint);margin:4px 2px 0;">Use this if the same wording shows up for both directions — e.g. a transfer to and from savings — and each direction should get a different category.</p>
         </div>
+        <div class="field span2">
+          <div id="rule-preview" style="font-size:12px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;line-height:1.6;"></div>
+        </div>
       </div>
     </div>
     <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">${isEdit?'Save changes':'Add rule'}</button></div>
   `);
+  function updatePreview(){
+    const kw = document.getElementById('r-kw').value;
+    const direction = document.getElementById('r-dir').value;
+    const preview = document.getElementById('rule-preview');
+    if(!kw.trim()){
+      preview.innerHTML = `<span style="color:var(--ink-faint);">Start typing to see how many transactions this would match.</span>`;
+      return;
+    }
+    const {total, uncategorised, examples} = ruleMatchPreview(kw, direction);
+    const reason = riskyRuleReason(kw);
+    preview.innerHTML = `
+      <div style="display:flex;align-items:center;gap:6px;font-weight:600;color:${reason?'var(--gold)':'var(--ink)'};">
+        ${reason ? iconWarnTriangle() : ''}
+        Matches ${total} transaction${total===1?'':'s'}${uncategorised ? ` (${uncategorised} uncategorised would be tagged right away)` : ''}
+      </div>
+      ${examples.length ? `<div style="margin-top:4px;color:var(--ink-faint);">e.g. ${examples.map(e=>escHTML(e)).join(' · ')}</div>` : ''}
+      ${reason ? `<div style="margin-top:4px;color:var(--gold);">${escHTML(reason)}</div>` : ''}
+    `;
+  }
+  document.getElementById('r-kw').addEventListener('input', updatePreview);
+  document.getElementById('r-dir').addEventListener('change', updatePreview);
+  updatePreview();
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('m-save').onclick = ()=>{
     const kw = document.getElementById('r-kw').value.trim();
