@@ -1987,6 +1987,9 @@ function renderBulkToolbar(){
       <span>Set category:</span>
       <select id="bulk-category-select" style="min-width:150px;">${categoryOptionsHTML('')}</select>
       <button class="btn btn-sm" id="bulk-category-apply">Apply</button>
+      <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--ink-soft);font-weight:500;white-space:nowrap;">
+        <input type="checkbox" id="bulk-remember-rules"> Also create rules from these
+      </label>
     </div>
   `;
   document.getElementById('bulk-clear').onclick = ()=>{ UI.txSelected.clear(); renderTxBody(); };
@@ -2003,13 +2006,26 @@ function renderBulkToolbar(){
   };
   document.getElementById('bulk-category-apply').onclick = ()=>{
     const val = document.getElementById('bulk-category-select').value;
+    const alsoLearn = document.getElementById('bulk-remember-rules').checked;
     let count = 0;
+    const learned = [];
     UI.txSelected.forEach(id=>{
       const t = DB.transactions.find(x=>x.id===id);
-      if(t && !t.transferId){ t.category = val; count++; }
+      if(t && !t.transferId){
+        t.category = val;
+        count++;
+        if(alsoLearn){
+          const r = learnRuleFromTransaction(t);
+          if(r) learned.push(r);
+        }
+      }
     });
     scheduleSave(); UI.txSelected.clear(); renderTxBody(); renderSidebarBits();
-    toast(`Set category for ${count} transaction${count===1?'':'s'}`);
+    if(alsoLearn && learned.length){
+      toast(`Set category for ${count} transaction${count===1?'':'s'} — learned ${learned.length} new rule${learned.length===1?'':'s'} (e.g. "${learned[0].keyword}" → ${learned[0].category})`);
+    } else {
+      toast(`Set category for ${count} transaction${count===1?'':'s'}`);
+    }
   };
 }
 function renderTxBody(){
@@ -3031,19 +3047,60 @@ function renderCatList(){
     };
   });
 }
+// Words that turn up constantly as bank-statement transaction-type noise
+// rather than merchant names. A rule keyed on one of these (or anything very
+// short) is much more likely to misfire across unrelated transactions than
+// to correctly identify one merchant — usually a sign it was learned from a
+// description before enough of the noise prefix had been stripped away.
+const RULE_NOISE_WORDS = new Set([
+  'CARD','PAYMENT','PAYMENTS','DIRECT','DEBIT','CREDIT','TRANSFER','TFR',
+  'FASTER','STANDING','ORDER','THIRD','PARTY','BILL','CONTACTLESS','ONLINE',
+  'RECEIPT','WITHDRAWAL','CASH','ATM','REF','REFERENCE','MANDATE','GBP',
+  'MADE','FROM','TO','AT','VIA','NO','RATE','POS','MOBILE','APP','GIRO','BANK','SO','DD',
+]);
+// Learns a new auto-tagging rule from an already-categorised transaction,
+// reusing the same noise-stripped merchant-name extraction used for merchant
+// grouping and recurring detection. Returns the {keyword, category} that was
+// learned, or null if nothing was added (no category, an existing rule
+// already covers this description, or the merchant name is too short/vague
+// to be a safe keyword) — callers use this to skip silently rather than
+// create redundant or low-quality rules.
+function learnRuleFromTransaction(t){
+  if(!t || !t.category) return null;
+  if(suggestCategory(t.description)) return null;
+  const word = merchantKeyFor(t.description).toUpperCase().replace(/[^A-Z0-9 ]/g,'').trim();
+  if(word.length < 3) return null;
+  if(DB.rules.some(r=> r.keyword.toUpperCase()===word)) return null;
+  DB.rules.unshift({keyword:word, category:t.category});
+  return {keyword:word, category:t.category};
+}
+function riskyRuleReason(keyword){
+  const kw = (keyword||'').trim().toUpperCase();
+  if(!kw) return '';
+  if(RULE_NOISE_WORDS.has(kw)) return `"${kw}" is a common bank-statement word, not a merchant name — this rule may match far more transactions than intended.`;
+  if(kw.length < 4) return `"${kw}" is quite short — it may match inside unrelated words or descriptions.`;
+  return '';
+}
+function iconWarnTriangle(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`; }
 function renderRuleList(){
   const host = document.getElementById('rule-list');
   if(!DB.rules.length){ host.innerHTML = `<div class="empty-state" style="padding:20px;"><p style="font-size:12.5px;">No rules yet. Add one to auto-suggest categories during import.</p></div>`; return; }
-  host.innerHTML = DB.rules.map((r,i)=>`
+  const riskyCount = DB.rules.filter(r=> riskyRuleReason(r.keyword)).length;
+  const summary = riskyCount ? `<div style="display:flex;align-items:center;gap:6px;color:var(--gold);font-size:11.5px;font-weight:600;margin-bottom:8px;">${iconWarnTriangle()} ${riskyCount} rule${riskyCount===1?'':'s'} look${riskyCount===1?'s':''} generic — worth a quick review (hover the ${'\u26A0'} icon)</div>` : '';
+  host.innerHTML = summary + DB.rules.map((r,i)=>{
+    const reason = riskyRuleReason(r.keyword);
+    return `
     <div class="rule-row">
       <span>if description contains</span>
       <span class="kw">${escHTML(r.keyword)}</span>
+      ${reason ? `<span class="rule-risk-flag" style="color:var(--gold);cursor:help;" title="${escAttr(reason)}">${iconWarnTriangle()}</span>` : ''}
       <span class="arrow">→</span>
       <span class="rc"><strong>${escHTML(r.category)}</strong></span>
       <button class="row-icon-btn" data-action="edit-rule" data-i="${i}" title="Edit">${iconEdit()}</button>
       <button class="row-icon-btn" data-action="del-rule" data-i="${i}" title="Delete">${iconTrash()}</button>
     </div>
-  `).join('');
+  `;
+  }).join('');
   host.querySelectorAll('[data-action="edit-rule"]').forEach(b=> b.onclick = ()=> openRuleModal(parseInt(b.dataset.i)));
   host.querySelectorAll('[data-action="del-rule"]').forEach(b=> b.onclick = ()=>{
     DB.rules.splice(parseInt(b.dataset.i),1); scheduleSave(); renderRuleList(); toast('Rule deleted');
@@ -3532,27 +3589,16 @@ function confirmImport(){
   const st = UI.importState;
   const toImport = st.parsed.filter(p=>p.include && p.date);
   if(!toImport.length){ toast('No rows selected to import', 'error'); return; }
-  const newRuleKeywords = new Set(DB.rules.map(r=>r.keyword.toUpperCase()));
   const learnedRules = [];
   toImport.forEach(p=>{
-    DB.transactions.push({
+    const t = {
       id: uid('tx'), date:p.date, description:p.description, amount:p.amount,
       category:p.category||'', account:'Imported', notes:'', source:'import'
-    });
-    if(st.rememberRules && p.category){
-      const already = suggestCategory(p.description);
-      if(!already){
-        // Reuse the same noise-prefix/suffix stripping used for merchant grouping
-        // and recurring detection, rather than just grabbing the first word — bank
-        // descriptions usually start with a generic prefix like "CARD PAYMENT TO"
-        // or "DIRECT DEBIT", so the first word alone makes a poor, over-broad rule.
-        const word = merchantKeyFor(p.description).toUpperCase().replace(/[^A-Z0-9 ]/g,'').trim();
-        if(word.length>=3 && !newRuleKeywords.has(word)){
-          DB.rules.unshift({keyword:word, category:p.category});
-          newRuleKeywords.add(word);
-          learnedRules.push({keyword:word, category:p.category});
-        }
-      }
+    };
+    DB.transactions.push(t);
+    if(st.rememberRules){
+      const learned = learnRuleFromTransaction(t);
+      if(learned) learnedRules.push(learned);
     }
   });
   DB.transactions.sort((a,b)=> a.date.localeCompare(b.date));
