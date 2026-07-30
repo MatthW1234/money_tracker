@@ -518,6 +518,10 @@ textarea{ resize:vertical; min-height:60px; }
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="0.6" fill="currentColor"/></svg>
         <span class="lbl">Spending Plan</span>
       </button>
+      <button class="nav-item" data-tab="investments">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>
+        <span class="lbl">Investments</span>
+      </button>
     </nav>
     <div class="sidebar-foot">
       <div class="balance-chip">
@@ -661,6 +665,7 @@ function buildSeedDB(){
     merchantAliases: {},
     accounts: ['Current Account', 'Savings', 'Credit Card'],
     discretionaryCategories: ['Dining Out', 'Entertainment', 'Shopping', 'Subscriptions', 'Travel'],
+    investmentCategories: ['Savings/Investment'],
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -679,6 +684,7 @@ function buildEmptyDB(){
     merchantAliases: {},
     accounts: [],
     discretionaryCategories: [],
+    investmentCategories: [],
   };
 }
 
@@ -1132,6 +1138,7 @@ const UI = {
   txFilters: {search:'', category:'all', type:'all', from:'', to:''},
   charts: {},
   importState: null,
+  investPeriod: 'month',
 };
 
 const NAV_ICONS_TITLE = {
@@ -1140,6 +1147,7 @@ const NAV_ICONS_TITLE = {
   import: ['Import statement','Bring in a CSV from your bank and assign categories in bulk.'],
   categories: ['Categories','Manage the groups used across your dashboard and imports, and the auto-tagging rules.'],
   plan: ['Spending Plan','What you can actually afford, based on your balance and regular bills.'],
+  investments: ['Investments','How much you\u2019re putting away, and how much more room you likely have.'],
 };
 
 function setTab(tab){
@@ -1199,6 +1207,7 @@ function renderContent(){
   else if(UI.tab==='import') renderImport(c);
   else if(UI.tab==='categories') renderCategories(c);
   else if(UI.tab==='plan') renderPlan(c);
+  else if(UI.tab==='investments') renderInvestments(c);
 }
 
 /* =========================================================
@@ -2410,6 +2419,187 @@ function planNumbers(){
     nextIncomeDate, horizon, stillDueItems, stillDueTotal, wishlistTotal, availableToSpend };
 }
 
+/* =========================================================
+   INVESTMENTS
+   ========================================================= */
+function investExpenseList(list){
+  return list.filter(t=> t.amount<0 && countsTowardTotals(t) && DB.investmentCategories.includes(t.category));
+}
+function sumInvest(list){ return investExpenseList(list).reduce((s,t)=> s+Math.abs(t.amount), 0); }
+function discretionaryExpenseList(list){
+  return list.filter(t=> t.amount<0 && countsTowardTotals(t) && DB.discretionaryCategories.includes(t.category));
+}
+function sumDiscretionary(list){ return discretionaryExpenseList(list).reduce((s,t)=> s+Math.abs(t.amount), 0); }
+
+// The headroom breakdown: income minus essentials minus what you already
+// invest leaves your "uncommitted" money for the period. Some of that is
+// already going to discretionary spending (dining out, etc); whatever's left
+// beyond that is money that isn't allocated to anything in particular — the
+// clearest candidate for a bigger contribution.
+function investmentHeadroom(range){
+  const list = txInRange(range.from, range.to);
+  const income = sumIncome(list);
+  const expense = sumExpense(list);
+  const investAmt = sumInvest(list);
+  const discAmt = sumDiscretionary(list);
+  const essentialAmt = Math.max(0, expense - investAmt - discAmt);
+  const headroom = income - essentialAmt - investAmt;
+  const trueSurplus = headroom - discAmt;
+  const rate = income > 0 ? (investAmt / income * 100) : 0;
+  return { income, expense, investAmt, discAmt, essentialAmt, headroom, trueSurplus, rate, count: investExpenseList(list).length };
+}
+function investmentMonthlySeries(){
+  return trendBuckets('month').map(b=>{
+    const list = txInRange(b.from, b.to);
+    const invest = sumInvest(list);
+    const income = sumIncome(list);
+    const rate = income > 0 ? (invest / income * 100) : 0;
+    return { ...b, invest, income, rate };
+  });
+}
+function investmentRecurring(){
+  return detectRecurring()
+    .filter(r=> DB.investmentCategories.includes(r.category))
+    .map(r=>{
+      const overdueDays = daysBetween(r.nextExpected, todayISO());
+      return { ...r, overdueDays, missed: overdueDays > 5 };
+    })
+    .sort((a,b)=> b.overdueDays - a.overdueDays);
+}
+function lastInvestmentTx(){
+  const all = DB.transactions
+    .filter(t=> t.amount<0 && countsTowardTotals(t) && DB.investmentCategories.includes(t.category))
+    .sort((a,b)=> b.date.localeCompare(a.date));
+  return all.length ? all[0] : null;
+}
+function renderInvestments(c){
+  if(!DB.investmentCategories.length){
+    c.innerHTML = `
+      <div class="empty-state panel" style="padding:60px 20px;">
+        ${iconInvest()}
+        <h4>No investment categories set yet</h4>
+        <p style="max-width:420px;margin-left:auto;margin-right:auto;">Flag a category — like "Savings/Investment" or a dedicated ISA/pension category — as <strong>Investment</strong> on the Categories tab, and this page will track your contributions and how much headroom you likely have.</p>
+        <button class="btn btn-primary" id="btn-goto-categories" style="margin-top:10px;">Go to Categories →</button>
+      </div>`;
+    document.getElementById('btn-goto-categories').onclick = ()=>{ document.querySelector('[data-tab="categories"]').click(); };
+    return;
+  }
+
+  const range = periodRange(UI.investPeriod);
+  const h = investmentHeadroom(range);
+  const last = lastInvestmentTx();
+  const lastLabel = last ? `${ukDate(last.date)}${last.date<=todayISO() ? ` · ${Math.max(0,daysBetween(last.date, todayISO()))}d ago` : ''}` : 'No contributions yet';
+  const recurring = investmentRecurring();
+
+  c.innerHTML = `
+    <div class="panel-head" style="margin-bottom:14px;">
+      <div class="seg" id="invest-period-seg">
+        <button data-p="month" class="${UI.investPeriod==='month'?'active':''}">This month</button>
+        <button data-p="year" class="${UI.investPeriod==='year'?'active':''}">This year</button>
+        <button data-p="all" class="${UI.investPeriod==='all'?'active':''}">All time</button>
+      </div>
+      <div class="page-sub" style="margin:0;">${range.label}</div>
+    </div>
+
+    <div class="kpi-row">
+      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Invested</div><div class="kpi-val income num">${gbp(h.investAmt)}</div><div class="kpi-sub">${h.count} contribution${h.count===1?'':'s'} this period</div></div>
+      <div class="kpi-card balance"><div class="stripe"></div><div class="kpi-lbl">Contribution rate</div><div class="kpi-val num" style="color:var(--gold)">${h.rate.toFixed(1)}%</div><div class="kpi-sub">of income this period</div></div>
+      <div class="kpi-card net"><div class="stripe"></div><div class="kpi-lbl">Comfortable headroom</div><div class="kpi-val num" style="color:${h.headroom>=0?'var(--brand)':'var(--expense)'}">${gbp(h.headroom)}</div><div class="kpi-sub">beyond essentials + current investing</div></div>
+      <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Last contribution</div><div class="kpi-val num" style="font-size:16px;">${lastLabel}</div><div class="kpi-sub">${last ? escHTML(last.description) : ''}</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Monthly contributions<small>Last 12 months</small></div></div>
+        <div class="chart-wrap"><canvas id="invest-contrib-chart"></canvas></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Contribution rate vs income<small>Investing as a % of income, last 12 months</small></div></div>
+        <div class="chart-wrap"><canvas id="invest-rate-chart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px;">
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Where your headroom sits<small>${range.label}</small></div></div>
+        <div class="qc-line"><span>Income</span><span class="num">${gbp(h.income)}</span></div>
+        <div class="qc-line"><span>− Essential &amp; committed spending</span><span class="num">−${gbp(h.essentialAmt)}</span></div>
+        <div class="qc-line"><span>− Current investment contributions</span><span class="num">−${gbp(h.investAmt)}</span></div>
+        <div class="qc-line qc-total"><span>= Uncommitted headroom</span><span class="num" style="color:${h.headroom>=0?'var(--brand)':'var(--expense)'}">${gbp(h.headroom)}</span></div>
+        <div class="qc-line" style="padding-left:12px;"><span>· already going to discretionary spending</span><span class="num">${gbp(h.discAmt)}</span></div>
+        <div class="qc-line" style="padding-left:12px;"><span>· genuinely unallocated</span><span class="num" style="color:${h.trueSurplus>=0?'var(--income)':'var(--expense)'}">${gbp(h.trueSurplus)}</span></div>
+        <p style="font-size:11px;color:var(--ink-faint);margin:12px 2px 0;">"Genuinely unallocated" is money that's neither essential, already invested, nor spent on discretionary things — the clearest room to put more toward investing, if you're comfortable with it.</p>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Recurring contributions<small>Detected from your transaction history</small></div></div>
+        <div id="invest-recurring-list"></div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('invest-period-seg').addEventListener('click', e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    UI.investPeriod = b.dataset.p;
+    renderInvestments(c);
+  });
+
+  const recHost = document.getElementById('invest-recurring-list');
+  if(!recurring.length){
+    recHost.innerHTML = `<div class="empty-state" style="padding:24px 10px;"><h4>Nothing recurring detected yet</h4><p style="font-size:12.5px;">Once an investment category has at least two roughly-monthly transactions, they'll show up here.</p></div>`;
+  } else {
+    recHost.innerHTML = recurring.map(r=> `
+      <div class="movers-row">
+        <span class="movers-desc" style="white-space:normal;line-height:1.4;" title="${escAttr(r.description)}">${escHTML(r.description)} <span class="stamp-mini">${escHTML(r.category)}</span><br><span style="color:var(--ink-faint);font-size:10.5px;">every ~${r.avgIntervalDays}d · ${r.occurrences} seen · next ~${ukDateShort(r.nextExpected)}</span></span>
+        <span class="movers-amt num" style="color:var(--ink);">${gbp(Math.abs(r.amount))}</span>
+        <span class="stamp-mini" style="background:${r.missed?'var(--expense-wash)':'var(--income-wash)'};color:${r.missed?'var(--expense)':'var(--income)'};">${r.missed ? `${r.overdueDays}d overdue` : 'on track'}</span>
+      </div>
+    `).join('');
+  }
+
+  drawInvestContribChart();
+  drawInvestRateChart();
+}
+function iconInvest(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" width="40" height="40"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>`; }
+function drawInvestContribChart(){
+  const series = investmentMonthlySeries();
+  const ctx = document.getElementById('invest-contrib-chart');
+  if(!ctx) return;
+  if(UI.charts.investContrib) UI.charts.investContrib.destroy();
+  UI.charts.investContrib = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: series.map(s=>s.label),
+      datasets: [{ label:'Invested', data: series.map(s=>s.invest), backgroundColor:'#0B6E4F', borderRadius:3 }],
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(item)=> ` ${gbp(item.parsed.y)}`}} },
+      scales:{ y:{ ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}}, grid:{color:'#E7EBE3'} },
+                x:{ grid:{display:false}, ticks:{font:{size:10.5}} } }
+    }
+  });
+}
+function drawInvestRateChart(){
+  const series = investmentMonthlySeries();
+  const ctx = document.getElementById('invest-rate-chart');
+  if(!ctx) return;
+  if(UI.charts.investRate) UI.charts.investRate.destroy();
+  UI.charts.investRate = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: series.map(s=>s.label),
+      datasets: [{ label:'Rate', data: series.map(s=>s.rate), tension:.3, fill:true, borderWidth:2.5, pointRadius:2,
+        borderColor:'#A9791F', backgroundColor:'rgba(169,121,31,.1)' }],
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(item)=> ` ${item.parsed.y.toFixed(1)}% of income`}} },
+      scales:{ y:{ ticks:{callback:(v)=>v+'%', font:{size:11}}, grid:{color:'#E7EBE3'} },
+                x:{ grid:{display:false}, ticks:{font:{size:10.5}} } }
+    }
+  });
+}
+
 function renderPlan(c){
   const n = planNumbers();
   const horizonLabel = n.nextIncomeDate ? `before your next expected pay (~${ukDateShort(n.horizon)})` : `in the next 30 days`;
@@ -2768,6 +2958,7 @@ function renderCatList(){
         const used = DB.transactions.filter(t=>t.category===cat.name).length;
         const isRegular = DB.regularCategories.includes(cat.name);
         const isDiscretionary = DB.discretionaryCategories.includes(cat.name);
+        const isInvestment = DB.investmentCategories.includes(cat.name);
         const budget = DB.budgets[cat.name];
         return `<div class="cat-list-row">
           <span class="stamp ${kind==='income'?'c-income':'c-expense'}">${escHTML(cat.name)}</span>
@@ -2778,6 +2969,9 @@ function renderCatList(){
           </label>
           ${kind==='expense' ? `<label class="regular-toggle" title="Flag this as discretionary (non-essential) spending, so it's included in Savings Opportunities on the dashboard.">
             <input type="checkbox" data-action="toggle-discretionary" data-name="${escAttr(cat.name)}" ${isDiscretionary?'checked':''}> Discretionary
+          </label>` : ''}
+          ${kind==='expense' ? `<label class="regular-toggle" title="Flag this as an investment/savings contribution, so it's tracked on the Investments tab.">
+            <input type="checkbox" data-action="toggle-investment" data-name="${escAttr(cat.name)}" ${isInvestment?'checked':''}> Investment
           </label>` : ''}
           ${kind==='expense' ? `<label class="budget-input-wrap" title="Set a monthly budget for this category — shown as a progress bar on your dashboard.">
             Budget £<input type="number" min="0" step="1" class="budget-input" data-name="${escAttr(cat.name)}" value="${budget!=null?budget:''}" placeholder="—">/mo
@@ -2821,6 +3015,18 @@ function renderCatList(){
       toast(e.target.checked ? `${name} included in Savings Opportunities` : `${name} excluded from Savings Opportunities`);
     };
   });
+  host.querySelectorAll('[data-action="toggle-investment"]').forEach(cb=>{
+    cb.onchange = (e)=>{
+      const name = e.target.dataset.name;
+      if(e.target.checked){
+        if(!DB.investmentCategories.includes(name)) DB.investmentCategories.push(name);
+      } else {
+        DB.investmentCategories = DB.investmentCategories.filter(n=>n!==name);
+      }
+      scheduleSave();
+      toast(e.target.checked ? `${name} tracked on the Investments tab` : `${name} removed from the Investments tab`);
+    };
+  });
 }
 function renderRuleList(){
   const host = document.getElementById('rule-list');
@@ -2854,6 +3060,7 @@ function deleteCategory(name){
     DB.rules = DB.rules.filter(r=>r.category!==name);
     DB.regularCategories = DB.regularCategories.filter(n=>n!==name);
     DB.discretionaryCategories = DB.discretionaryCategories.filter(n=>n!==name);
+    DB.investmentCategories = DB.investmentCategories.filter(n=>n!==name);
     delete DB.budgets[name];
     scheduleSave(); closeModal(); renderContent(); toast('Category deleted');
   };
@@ -3584,6 +3791,8 @@ function handleRestoreFile(file){
       merchantAliases: (parsed.merchantAliases && typeof parsed.merchantAliases==='object') ? parsed.merchantAliases : {},
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
       discretionaryCategories: Array.isArray(parsed.discretionaryCategories) ? parsed.discretionaryCategories : [],
+      investmentCategories: Array.isArray(parsed.investmentCategories) ? parsed.investmentCategories : [],
+      lastImport: (parsed.lastImport && typeof parsed.lastImport==='object') ? parsed.lastImport : null,
     };
     const currentCount = DB.transactions.length;
     openModal(`
@@ -3654,6 +3863,7 @@ async function init(){
   if(!DB.merchantAliases) DB.merchantAliases = {};
   if(!DB.accounts) DB.accounts = [];
   if(!DB.discretionaryCategories) DB.discretionaryCategories = [];
+  if(!DB.investmentCategories) DB.investmentCategories = [];
   if(DB.lastImport === undefined) DB.lastImport = null;
   if(!loaded) scheduleSave();
 

@@ -30,6 +30,14 @@ them from category history when the transactions vary too much to match
 automatically), shows what's coming up, and weighs planned purchases
 against what you can actually afford.
 
+**Investments:** tag any category (e.g. "Savings/Investment", or a
+dedicated ISA/pension category) as an Investment category in Categories,
+and this tab tracks what you're contributing — monthly totals, contribution
+rate as a % of income, a headroom breakdown showing how much room you
+likely have to invest more (income minus essentials minus what you already
+invest, split out from money already going to discretionary spending), and
+detected recurring contributions with a flag if one looks overdue.
+
 ## Files
 
 - `index.html` — the whole app (HTML/CSS/JS, one file)
