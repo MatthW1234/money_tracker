@@ -38,6 +38,8 @@
   --income-wash:#E7F5EC;
   --expense:#B3392E;
   --expense-wash:#FBEAE7;
+  --split:#2563EB;
+  --split-wash:#E5EDFC;
   --focus:#2563EB;
   --radius-sm:6px;
   --radius:12px;
@@ -50,6 +52,42 @@
   --font-mono:'IBM Plex Mono', ui-monospace, monospace;
   --sidebar-w:230px;
 }
+
+/* Dark theme — applied via data-theme="dark" on <html>, set from JS based on
+   the user's saved preference (or system preference, if set to "Auto"). The
+   sidebar and toast notifications are deliberately excluded — they're a
+   fixed dark-green "brand chrome" in both themes, so nothing there needs to
+   change. Every other colour is a CSS variable, so overriding them here is
+   enough to re-theme the whole app without touching individual rules —
+   Chart.js/SVG-drawn colours are the exception, handled separately in JS. */
+[data-theme="dark"]{
+  --bg:#12160F;
+  --surface:#1B211C;
+  --surface-2:#232A24;
+  --ink:#EAF1EC;
+  --ink-soft:#A9B7AE;
+  --ink-faint:#6E7C72;
+  --line:#333C34;
+  --line-strong:#48544A;
+  --brand:#2FBE8A;
+  --brand-wash:#173629;
+  --gold:#E3AC4E;
+  --gold-wash:#3C2E12;
+  --income:#3FD695;
+  --income-wash:#123424;
+  --expense:#F17164;
+  --expense-wash:#3B1917;
+  --split:#6699FF;
+  --split-wash:#1B2B4D;
+  --focus:#6699FF;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35);
+  --shadow:0 4px 16px rgba(0,0,0,.4), 0 1px 3px rgba(0,0,0,.3);
+  --shadow-lg:0 12px 40px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.35);
+}
+[data-theme="dark"] #storage-warning{ border-bottom-color:#5C4622; color:#F4DFA8; }
+[data-theme="dark"] #storage-warning-dismiss{ color:#F4DFA8; }
+[data-theme="dark"] .btn-danger{ border-color:#5C2A24; }
+[data-theme="dark"] .btn-danger:hover{ background:#43201C; }
 
 *{box-sizing:border-box;}
 html,body{height:100%;}
@@ -132,7 +170,7 @@ a{ color:inherit; }
 .brand-mark{
   width:34px;height:34px; border-radius:50%;
   background:var(--gold-wash);
-  color:var(--brand-ink);
+  color:var(--brand);
   display:flex; align-items:center; justify-content:center;
   font-family:var(--font-display); font-weight:700; font-size:17px;
   border:2px solid rgba(255,255,255,.25);
@@ -227,7 +265,7 @@ a{ color:inherit; }
 
 .seg{ display:inline-flex; background:var(--surface-2); border:1px solid var(--line); border-radius:9px; padding:3px; gap:2px; }
 .seg button{ border:none; background:transparent; padding:6px 13px; border-radius:6px; font-size:12.5px; font-weight:600; color:var(--ink-soft); }
-.seg button.active{ background:var(--surface); color:var(--brand-ink); box-shadow:var(--shadow-sm); }
+.seg button.active{ background:var(--surface); color:var(--brand); box-shadow:var(--shadow-sm); }
 
 .panel{
   background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
@@ -263,7 +301,7 @@ a{ color:inherit; }
 .stamp.c-expense{ color:var(--expense); background:var(--expense-wash); }
 .stamp.c-none{ color:var(--ink-faint); background:var(--surface-2); border-style:dashed; }
 .stamp.c-transfer{ color:var(--gold); background:var(--gold-wash); }
-.stamp.c-split{ color:#2563EB; background:#E5EDFC; }
+.stamp.c-split{ color:var(--split); background:var(--split-wash); }
 .cat-badge-clickable{ cursor:pointer; transition:box-shadow .12s ease; }
 .cat-badge-clickable:hover{ box-shadow:0 0 0 2px currentColor inset; }
 td.cat-cell{ white-space:nowrap; }
@@ -328,7 +366,7 @@ textarea{ resize:vertical; min-height:60px; }
 .steps{ display:flex; align-items:center; gap:6px; margin-bottom:18px; flex-wrap:wrap; }
 .step-pill{ display:flex; align-items:center; gap:7px; padding:6px 12px 6px 6px; border-radius:20px; background:var(--surface-2); border:1px solid var(--line); font-size:12px; font-weight:600; color:var(--ink-faint); }
 .step-pill .n{ width:20px;height:20px;border-radius:50%; background:var(--line); color:#fff; display:flex; align-items:center; justify-content:center; font-size:11px; }
-.step-pill.active{ background:var(--brand-wash); border-color:var(--brand); color:var(--brand-ink); }
+.step-pill.active{ background:var(--brand-wash); border-color:var(--brand); color:var(--brand); }
 .step-pill.active .n{ background:var(--brand); }
 .step-pill.done{ color:var(--ink-soft); }
 .step-pill.done .n{ background:var(--income); }
@@ -535,6 +573,9 @@ textarea{ resize:vertical; min-height:60px; }
         <div class="val num" id="sidebar-balance">£0.00</div>
       </div>
       <div class="icon-btn-row">
+        <button class="icon-btn" id="btn-theme-toggle" title="Switch theme">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/></svg>
+        </button>
         <button class="icon-btn" id="btn-settings" title="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
         </button>
@@ -734,6 +775,48 @@ async function loadDB(){
   }catch(e){ /* key not found, storage unavailable, or corrupt JSON */ }
   return null;
 }
+
+/* ---------- Theme (light / dark / auto) ----------
+   Stored separately from the main DB, same pattern as the app lock — it's a
+   device/browser preference, not ledger data, so it doesn't belong in
+   backups or sync with it. Applied as data-theme="light"|"dark" on <html>;
+   "auto" resolves to whichever the OS prefers and stays live if that changes
+   while the app is open. */
+const THEME_KEY = 'pocketledger_theme_v1';
+function getThemePref(){
+  try{ return window.localStorage.getItem(THEME_KEY) || 'auto'; }catch(e){ return 'auto'; }
+}
+function setThemePref(mode){
+  try{ window.localStorage.setItem(THEME_KEY, mode); }catch(e){ /* ignore */ }
+}
+function systemPrefersDark(){
+  return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+function resolvedTheme(){
+  const pref = getThemePref();
+  return pref==='auto' ? (systemPrefersDark() ? 'dark' : 'light') : pref;
+}
+function isDarkMode(){ return document.documentElement.getAttribute('data-theme') === 'dark'; }
+function applyTheme(){
+  document.documentElement.setAttribute('data-theme', resolvedTheme());
+  updateThemeToggleIcon();
+}
+function updateThemeToggleIcon(){
+  const btn = document.getElementById('btn-theme-toggle');
+  if(!btn) return;
+  const dark = isDarkMode();
+  btn.innerHTML = dark ? iconSun() : iconMoon();
+  btn.title = dark ? 'Switch to light theme' : 'Switch to dark theme';
+}
+function iconSun(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>`; }
+function iconMoon(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>`; }
+if(window.matchMedia){
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  const onSystemThemeChange = ()=>{ if(getThemePref()==='auto') applyTheme(); };
+  if(mq.addEventListener) mq.addEventListener('change', onSystemThemeChange);
+  else if(mq.addListener) mq.addListener(onSystemThemeChange); // older Safari
+}
+applyTheme(); // set before first paint so the app never flashes the wrong theme
 
 /* ---------- App lock (PIN gate) ----------
    This is a screen lock, not encryption: your data still sits as plain JSON
@@ -1757,9 +1840,9 @@ function drawBalanceChart(){
   if(UI.charts.balance) UI.charts.balance.destroy();
   const datasets = [{
     label: 'Balance', data, tension:.3, fill:true, borderWidth:2.5, pointRadius:2,
-    borderColor: '#0B6E4F', backgroundColor: 'rgba(11,110,79,.08)',
+    borderColor: cssVar('--brand'), backgroundColor: hexToRgba(cssVar('--brand'), .08),
     segment: {
-      borderColor: (c)=> (c.p0.parsed.y<0 || c.p1.parsed.y<0) ? '#B3392E' : '#0B6E4F',
+      borderColor: (c)=> (c.p0.parsed.y<0 || c.p1.parsed.y<0) ? cssVar('--expense') : cssVar('--brand'),
     },
   }];
   let labels = buckets.map(b=>b.label);
@@ -1773,7 +1856,7 @@ function drawBalanceChart(){
     ];
     datasets.push({
       label:'Forecast', data:forecastData, tension:.3, fill:false, borderWidth:2, pointRadius:2,
-      borderColor:'#A9791F', borderDash:[6,4],
+      borderColor:cssVar('--gold'), borderDash:[6,4],
     });
     datasets[0].data = [...data, ...new Array(forecast.length).fill(null)];
   }
@@ -1783,10 +1866,10 @@ function drawBalanceChart(){
     options:{
       responsive:true, maintainAspectRatio:false,
       interaction:{mode:'index', intersect:false},
-      plugins:{ legend:{display: UI.showForecast, position:'bottom', labels:{boxWidth:10, usePointStyle:true, font:{family:"'Inter',sans-serif", size:11}}},
+      plugins:{ legend:{display: UI.showForecast, position:'bottom', labels:{boxWidth:10, usePointStyle:true, font:{family:"'Inter',sans-serif", size:11}, color:chartTickColor()}},
         tooltip:{callbacks:{label:(ctx)=> ctx.parsed.y==null ? undefined : ` ${ctx.dataset.label}: ${gbp(ctx.parsed.y)}`}} },
-      scales:{ y:{ ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}}, grid:{color:'#E7EBE3'} },
-                x:{ grid:{display:false}, ticks:{font:{size:11}} } }
+      scales:{ y:{ ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}, color:chartTickColor()}, grid:{color:chartGridColor()} },
+                x:{ grid:{display:false}, ticks:{font:{size:11}, color:chartTickColor()} } }
     }
   });
 }
@@ -1811,9 +1894,9 @@ function drawCashFlowChart(list, income){
     return;
   }
 
-  const buckets = top.map(([name,amt],i)=> ({label:name, value:amt, color:DONUT_COLORS[i%DONUT_COLORS.length]}));
-  if(otherSum>0.005) buckets.push({label:'Other', value:otherSum, color:'#9CA3AF'});
-  if(net>0.005) buckets.push({label:'Net (saved)', value:net, color:'#1E8E5A'});
+  const buckets = top.map(([name,amt],i)=> ({label:name, value:amt, color:getDonutColors()[i%getDonutColors().length]}));
+  if(otherSum>0.005) buckets.push({label:'Other', value:otherSum, color:cssVar('--ink-faint')});
+  if(net>0.005) buckets.push({label:'Net (saved)', value:net, color:cssVar('--income')});
   const validBuckets = buckets.filter(b=>b.value>0.005);
 
   if(!validBuckets.length){
@@ -1859,7 +1942,7 @@ function drawCashFlowChart(list, income){
 
   host.innerHTML = `
     <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:100%;" preserveAspectRatio="xMidYMid meet">
-      ${ribbons.map(r=> `<path d="${sankeyRibbonPath(leftX+nodeW, r.y1, r.h1, rightX, r.y2, r.h2)}" fill="${r.color}" opacity="0.28"></path>`).join('')}
+      ${ribbons.map(r=> `<path d="${sankeyRibbonPath(leftX+nodeW, r.y1, r.h1, rightX, r.y2, r.h2)}" fill="${r.color}" opacity="${isDarkMode()?0.4:0.28}"></path>`).join('')}
       <rect x="${leftX}" y="${padTop}" width="${nodeW}" height="${leftTotalH}" rx="3" fill="var(--ink)"></rect>
       <text x="${leftX-8}" y="${leftMidY-6}" text-anchor="end" font-size="13" font-weight="600" fill="var(--ink)">Income</text>
       <text x="${leftX-8}" y="${leftMidY+11}" text-anchor="end" font-size="12" fill="var(--ink-faint)">${escHTML(gbp(income))}</text>
@@ -1884,22 +1967,39 @@ function drawTrendChart(){
     data: {
       labels: buckets.map(b=>b.label),
       datasets: [
-        {label:'Income', data:incomeData, borderColor:'#1E8E5A', backgroundColor:UI.trendGran==='week'?'#1E8E5A':'rgba(30,142,90,.12)', tension:.3, fill:UI.trendGran!=='week', borderWidth:2, borderRadius:4, pointRadius:2},
-        {label:'Expenses', data:expenseData, borderColor:'#B3392E', backgroundColor:UI.trendGran==='week'?'#B3392E':'rgba(179,57,46,.10)', tension:.3, fill:UI.trendGran!=='week', borderWidth:2, borderRadius:4, pointRadius:2},
+        {label:'Income', data:incomeData, borderColor:cssVar('--income'), backgroundColor:UI.trendGran==='week'?cssVar('--income'):hexToRgba(cssVar('--income'),.12), tension:.3, fill:UI.trendGran!=='week', borderWidth:2, borderRadius:4, pointRadius:2},
+        {label:'Expenses', data:expenseData, borderColor:cssVar('--expense'), backgroundColor:UI.trendGran==='week'?cssVar('--expense'):hexToRgba(cssVar('--expense'),.10), tension:.3, fill:UI.trendGran!=='week', borderWidth:2, borderRadius:4, pointRadius:2},
       ]
     },
     options:{
       responsive:true, maintainAspectRatio:false,
       interaction:{mode:'index', intersect:false},
-      plugins:{ legend:{position:'bottom', labels:{boxWidth:10, usePointStyle:true, font:{family:"'Inter',sans-serif", size:11.5}}},
+      plugins:{ legend:{position:'bottom', labels:{boxWidth:10, usePointStyle:true, font:{family:"'Inter',sans-serif", size:11.5}, color:chartTickColor()}},
         tooltip:{callbacks:{label:(ctx)=> ` ${ctx.dataset.label}: ${gbp(ctx.parsed.y)}`}} },
-      scales:{ y:{ beginAtZero:true, ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}}, grid:{color:'#E7EBE3'} },
-                x:{ grid:{display:false}, ticks:{font:{size:11}} } }
+      scales:{ y:{ beginAtZero:true, ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}, color:chartTickColor()}, grid:{color:chartGridColor()} },
+                x:{ grid:{display:false}, ticks:{font:{size:11}, color:chartTickColor()} } }
     }
   });
 }
 
+// Chart.js draws to a <canvas>, which — unlike CSS or SVG — can't resolve
+// var(--x) references, so colours handed to it have to be literal strings.
+// cssVar() reads the current resolved value of a CSS custom property so
+// chart colours stay in sync with the active theme; hexToRgba() derives a
+// translucent fill from the same source instead of hardcoding a second,
+// separate colour that could drift out of sync with it.
+function cssVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function hexToRgba(hex, alpha){
+  hex = (hex||'').trim().replace('#','');
+  if(hex.length===3) hex = hex.split('').map(c=>c+c).join('');
+  const r = parseInt(hex.slice(0,2),16)||0, g = parseInt(hex.slice(2,4),16)||0, b = parseInt(hex.slice(4,6),16)||0;
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+function chartGridColor(){ return isDarkMode() ? 'rgba(255,255,255,.08)' : '#E7EBE3'; }
+function chartTickColor(){ return cssVar('--ink-faint'); }
 const DONUT_COLORS = ['#0B6E4F','#A9791F','#B3392E','#2563EB','#7C3AED','#0D9488','#C2410C','#4B5563','#DB2777','#65A30D'];
+const DONUT_COLORS_DARK = ['#2FBE8A','#E3AC4E','#F17164','#6699FF','#A78BFA','#2DD4BF','#F0975A','#9CA8A1','#F472B6','#A3D977'];
+function getDonutColors(){ return isDarkMode() ? DONUT_COLORS_DARK : DONUT_COLORS; }
 function drawDonutChart(list, chartKey, canvasId, legendId, emptyTitle, emptyDesc){
   const byCat = {};
   expandSplits(list).forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=(byCat[k]||0)+Math.abs(t.amount); } });
@@ -1921,14 +2021,14 @@ function drawDonutChart(list, chartKey, canvasId, legendId, emptyTitle, emptyDes
   }
   UI.charts[chartKey] = new Chart(ctx, {
     type:'doughnut',
-    data:{ labels:entries.map(e=>e[0]), datasets:[{ data:entries.map(e=>e[1]), backgroundColor:DONUT_COLORS, borderWidth:2, borderColor:'#fff' }] },
+    data:{ labels:entries.map(e=>e[0]), datasets:[{ data:entries.map(e=>e[1]), backgroundColor:getDonutColors(), borderWidth:2, borderColor:cssVar('--surface') }] },
     options:{ responsive:true, maintainAspectRatio:false, cutout:'62%',
       plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(ctx)=> ` ${ctx.label}: ${gbp(ctx.parsed)}`}} } }
   });
   if(legendEl){
     legendEl.innerHTML = entries.map((e,i)=>{
       const pct = total? Math.round(e[1]/total*100) : 0;
-      return `<div class="legend-row"><span class="legend-dot" style="background:${DONUT_COLORS[i%DONUT_COLORS.length]}"></span><span class="legend-name">${escHTML(e[0])}</span><span class="legend-amt num">${gbp(e[1])}</span><span class="legend-pct">${pct}%</span></div>`;
+      return `<div class="legend-row"><span class="legend-dot" style="background:${getDonutColors()[i%getDonutColors().length]}"></span><span class="legend-name">${escHTML(e[0])}</span><span class="legend-amt num">${gbp(e[1])}</span><span class="legend-pct">${pct}%</span></div>`;
     }).join('');
   }
 }
@@ -2920,13 +3020,13 @@ function drawInvestContribChart(){
     type: 'bar',
     data: {
       labels: series.map(s=>s.label),
-      datasets: [{ label:'Invested', data: series.map(s=>s.invest), backgroundColor:'#0B6E4F', borderRadius:3 }],
+      datasets: [{ label:'Invested', data: series.map(s=>s.invest), backgroundColor:cssVar('--brand'), borderRadius:3 }],
     },
     options:{
       responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(item)=> ` ${gbp(item.parsed.y)}`}} },
-      scales:{ y:{ ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}}, grid:{color:'#E7EBE3'} },
-                x:{ grid:{display:false}, ticks:{font:{size:10.5}} } }
+      scales:{ y:{ ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}, color:chartTickColor()}, grid:{color:chartGridColor()} },
+                x:{ grid:{display:false}, ticks:{font:{size:10.5}, color:chartTickColor()} } }
     }
   });
 }
@@ -2940,13 +3040,13 @@ function drawInvestRateChart(){
     data: {
       labels: series.map(s=>s.label),
       datasets: [{ label:'Rate', data: series.map(s=>s.rate), tension:.3, fill:true, borderWidth:2.5, pointRadius:2,
-        borderColor:'#A9791F', backgroundColor:'rgba(169,121,31,.1)' }],
+        borderColor:cssVar('--gold'), backgroundColor:hexToRgba(cssVar('--gold'),.1) }],
     },
     options:{
       responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(item)=> ` ${item.parsed.y.toFixed(1)}% of income`}} },
-      scales:{ y:{ ticks:{callback:(v)=>v+'%', font:{size:11}}, grid:{color:'#E7EBE3'} },
-                x:{ grid:{display:false}, ticks:{font:{size:10.5}} } }
+      scales:{ y:{ ticks:{callback:(v)=>v+'%', font:{size:11}, color:chartTickColor()}, grid:{color:chartGridColor()} },
+                x:{ grid:{display:false}, ticks:{font:{size:10.5}, color:chartTickColor()} } }
     }
   });
 }
@@ -4149,6 +4249,15 @@ function openSettingsModal(){
         <input type="number" step="0.01" id="s-balance" value="${DB.startingBalance}">
       </div>
       <div style="border-top:1px solid var(--line); padding-top:14px; margin-bottom:14px;">
+        <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Theme</div>
+        <div class="seg" id="theme-seg">
+          <button data-t="light" class="${getThemePref()==='light'?'active':''}">Light</button>
+          <button data-t="dark" class="${getThemePref()==='dark'?'active':''}">Dark</button>
+          <button data-t="auto" class="${getThemePref()==='auto'?'active':''}">Auto</button>
+        </div>
+        <p style="font-size:11px;color:var(--ink-faint);margin:6px 2px 0;">"Auto" follows your device's system setting.</p>
+      </div>
+      <div style="border-top:1px solid var(--line); padding-top:14px; margin-bottom:14px;">
         <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Accounts</div>
         <div style="font-size:11.5px;color:var(--ink-faint);margin-bottom:10px;">Add an account here to have it available in the Account/Transfer dropdowns before you've used it on any transaction. Give one a starting balance to make the Accounts panel match your real bank balance.</div>
         <div style="display:flex;gap:6px;margin-bottom:10px;">
@@ -4173,6 +4282,13 @@ function openSettingsModal(){
   `);
   renderAccountManagerBody();
   renderAppLockBody();
+  document.getElementById('theme-seg').addEventListener('click', e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    setThemePref(b.dataset.t);
+    applyTheme();
+    document.querySelectorAll('#theme-seg button').forEach(x=> x.classList.toggle('active', x===b));
+    renderContent();
+  });
   document.getElementById('add-account-btn').onclick = ()=>{
     const input = document.getElementById('new-account-name');
     const name = input.value.trim();
@@ -4295,6 +4411,12 @@ function startApp(){
   });
   document.getElementById('btn-settings').onclick = openSettingsModal;
   document.getElementById('btn-export').onclick = exportBackup;
+  document.getElementById('btn-theme-toggle').onclick = ()=>{
+    setThemePref(isDarkMode() ? 'light' : 'dark');
+    applyTheme();
+    renderContent();
+  };
+  updateThemeToggleIcon();
 
   setTab('dashboard');
 

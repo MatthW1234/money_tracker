@@ -50,6 +50,12 @@ detected recurring contributions with a flag if one looks overdue.
   holds your bank data. Upload the whole `vendor` folder along with the
   files above.
 
+## Theme
+
+Toggle light/dark from the sun/moon icon in the sidebar, or pick Light,
+Dark, or Auto (follows your device's system setting, live) under Settings.
+Your choice is remembered per-device, separately from your ledger data.
+
 ## Security notes
 
 - The app sets a strict Content-Security-Policy and loads no third-party
