@@ -263,6 +263,7 @@ a{ color:inherit; }
 .stamp.c-expense{ color:var(--expense); background:var(--expense-wash); }
 .stamp.c-none{ color:var(--ink-faint); background:var(--surface-2); border-style:dashed; }
 .stamp.c-transfer{ color:var(--gold); background:var(--gold-wash); }
+.stamp.c-split{ color:#2563EB; background:#E5EDFC; }
 .cat-badge-clickable{ cursor:pointer; transition:box-shadow .12s ease; }
 .cat-badge-clickable:hover{ box-shadow:0 0 0 2px currentColor inset; }
 td.cat-cell{ white-space:nowrap; }
@@ -891,13 +892,15 @@ function categoryOptionsHTML(selected, opts){
   html += `<optgroup label="Expense">` + groups.expense.map(n=>`<option value="${escAttr(n)}" ${n===selected?'selected':''}>${escHTML(n)}</option>`).join('') + `</optgroup>`;
   return html;
 }
-function suggestCategory(description){
+function suggestCategory(description, amount){
   const desc = (description||'').toUpperCase();
   let best = null;
   for(const r of DB.rules){
-    if(r.keyword && desc.includes(r.keyword.toUpperCase())){
-      if(!best || r.keyword.length > best.keyword.length) best = r;
-    }
+    if(!r.keyword || !desc.includes(r.keyword.toUpperCase())) continue;
+    const dir = r.direction || 'any';
+    if(dir==='out' && !(amount<0)) continue;
+    if(dir==='in' && !(amount>0)) continue;
+    if(!best || r.keyword.length > best.keyword.length) best = r;
   }
   return best ? best.category : '';
 }
@@ -907,6 +910,26 @@ function txInRange(from, to){
   return DB.transactions.filter(t=> t.date >= from && t.date <= to);
 }
 function countsTowardTotals(t){ return !t.transferId && !t.excluded; }
+// A transaction can optionally carry t.splits = [{id, category, amount}, ...]
+// instead of a single t.category, when its total is allocated across more
+// than one category (e.g. one supermarket trip covering groceries and
+// household goods). t.category is blank while split. Anywhere that groups or
+// sums by category needs to see the split pieces individually rather than
+// the one parent row — categoryRowsFor/expandSplits do that; anything that
+// only cares about the total cash amount (sumIncome, sumExpense, balance,
+// duplicate detection, merchant grouping) can keep using the plain list,
+// since a split doesn't change the transaction's date, account, or total.
+function categoryRowsFor(t){
+  if(t.splits && t.splits.length){
+    return t.splits.map(s=> Object.assign({}, t, {category:s.category, amount:s.amount, splitId:s.id, isSplitPart:true}));
+  }
+  return [t];
+}
+function expandSplits(list){
+  const out = [];
+  list.forEach(t=> categoryRowsFor(t).forEach(r=>out.push(r)));
+  return out;
+}
 function sumIncome(list){ return list.reduce((s,t)=> (t.amount>0 && countsTowardTotals(t)) ? s+t.amount : s, 0); }
 function sumExpense(list){ return list.reduce((s,t)=> (t.amount<0 && countsTowardTotals(t)) ? s+Math.abs(t.amount) : s, 0); }
 function currentBalance(){
@@ -1024,6 +1047,7 @@ function detectRecurring(){
   const byDesc = {};
   DB.transactions.forEach(t=>{
     if(!countsTowardTotals(t)) return;
+    if(t.splits && t.splits.length) return; // split transactions don't have one category to cluster on
     const key = normalizeDescForRecurring(t.description);
     if(!key) return;
     (byDesc[key] = byDesc[key] || []).push(t);
@@ -1168,7 +1192,7 @@ function setTab(tab){
    ========================================================= */
 function renderSidebarBits(){
   document.getElementById('sidebar-balance').textContent = gbp(currentBalance());
-  const uncat = DB.transactions.filter(t=>!t.category && !t.transferId).length;
+  const uncat = DB.transactions.filter(t=>!t.category && !t.transferId && !(t.splits&&t.splits.length)).length;
   const badge = document.getElementById('uncat-badge');
   if(uncat>0){ badge.textContent = uncat; badge.classList.remove('hidden'); }
   else{ badge.classList.add('hidden'); }
@@ -1180,10 +1204,12 @@ function renderTopbarActions(){
     host.innerHTML = `
       <button class="btn" id="btn-autocat">${iconWand()} Auto-categorise</button>
       <button class="btn" id="btn-recheck">${iconRefresh()} Re-check all</button>
+      <button class="btn" id="btn-find-dupes">${iconLayers()} Find duplicates</button>
       <button class="btn btn-primary" id="btn-add-tx">${iconPlus()} Add transaction</button>`;
     document.getElementById('btn-add-tx').onclick = ()=> openTxModal(null);
     document.getElementById('btn-autocat').onclick = autoCategoriseAll;
     document.getElementById('btn-recheck').onclick = reapplyRulesToAll;
+    document.getElementById('btn-find-dupes').onclick = openDuplicatesModal;
     updateRecheckButtonLabel();
   } else if(UI.tab==='categories'){
     host.innerHTML = `<button class="btn btn-primary" id="btn-add-cat">${iconPlus()} Add category</button>`;
@@ -1500,16 +1526,17 @@ function openMerchantMergeModal(currentName, rawKeys){
 }
 function computeSavingsOpportunities(list, range){
   const periodStart = new Date(range.from+'T00:00:00');
+  const expandedList = expandSplits(list);
   const results = [];
   DB.discretionaryCategories.forEach(catName=>{
     if(!DB.categories.some(c=>c.name===catName)) return;
-    const current = list.filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t)).reduce((s,t)=> s+Math.abs(t.amount), 0);
+    const current = expandedList.filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t)).reduce((s,t)=> s+Math.abs(t.amount), 0);
     const monthlyTotals = [];
     for(let i=1;i<=3;i++){
       const base = new Date(periodStart.getFullYear(), periodStart.getMonth()-i, 1);
       const from = base.toISOString().slice(0,10);
       const to = new Date(base.getFullYear(), base.getMonth()+1, 0).toISOString().slice(0,10);
-      const monthSpend = txInRange(from,to)
+      const monthSpend = expandSplits(txInRange(from,to))
         .filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t))
         .reduce((s,t)=> s+Math.abs(t.amount), 0);
       if(monthSpend>0) monthlyTotals.push(monthSpend);
@@ -1523,8 +1550,9 @@ function computeSavingsOpportunities(list, range){
 function renderBudgets(list, budgetEntries){
   const host = document.getElementById('budget-list');
   if(!host) return;
+  const expandedList = expandSplits(list);
   const rows = budgetEntries.map(([catName, limit])=>{
-    const spent = list.filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t)).reduce((s,t)=> s+Math.abs(t.amount), 0);
+    const spent = expandedList.filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t)).reduce((s,t)=> s+Math.abs(t.amount), 0);
     const pct = limit>0 ? Math.min(999, Math.round(spent/limit*100)) : 0;
     const color = pct>=100 ? 'var(--expense)' : (pct>=80 ? 'var(--gold)' : 'var(--income)');
     return `<div class="budget-row">
@@ -1563,8 +1591,8 @@ function renderCompareTable(list, prevList){
   const host = document.getElementById('compare-table');
   if(!host) return;
   const byCat = {};
-  list.forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].cur+=Math.abs(t.amount); } });
-  prevList.forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].prev+=Math.abs(t.amount); } });
+  expandSplits(list).forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].cur+=Math.abs(t.amount); } });
+  expandSplits(prevList).forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].prev+=Math.abs(t.amount); } });
   const rows = Object.entries(byCat)
     .map(([name,v])=> ({name, ...v, delta:v.cur-v.prev}))
     .sort((a,b)=> Math.abs(b.delta)-Math.abs(a.delta))
@@ -1719,7 +1747,7 @@ function drawCashFlowChart(list, income){
   if(!ctx) return;
   if(UI.charts.cashflow) UI.charts.cashflow.destroy();
   const byCat = {};
-  list.forEach(t=>{
+  expandSplits(list).forEach(t=>{
     if(t.amount<0 && countsTowardTotals(t)){
       const k = t.category || 'Uncategorised';
       byCat[k] = (byCat[k]||0) + Math.abs(t.amount);
@@ -1808,7 +1836,7 @@ function drawTrendChart(){
 const DONUT_COLORS = ['#0B6E4F','#A9791F','#B3392E','#2563EB','#7C3AED','#0D9488','#C2410C','#4B5563','#DB2777','#65A30D'];
 function drawDonutChart(list, chartKey, canvasId, legendId, emptyTitle, emptyDesc){
   const byCat = {};
-  list.forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=(byCat[k]||0)+Math.abs(t.amount); } });
+  expandSplits(list).forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=(byCat[k]||0)+Math.abs(t.amount); } });
   let entries = Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
   if(entries.length>8){
     const top = entries.slice(0,7);
@@ -1858,7 +1886,9 @@ function filteredSortedTx(){
     list = list.filter(t=> t.description.toLowerCase().includes(q) || (t.notes||'').toLowerCase().includes(q));
   }
   if(f.category!=='all'){
-    list = list.filter(t=> f.category==='uncategorised' ? (!t.category && !t.transferId) : t.category===f.category);
+    list = list.filter(t=> f.category==='uncategorised'
+      ? (!t.category && !t.transferId && !(t.splits&&t.splits.length))
+      : (t.splits&&t.splits.length ? t.splits.some(s=>s.category===f.category) : t.category===f.category));
   }
   if(f.type!=='all'){
     if(f.type==='transfer') list = list.filter(t=> !!t.transferId);
@@ -2011,7 +2041,7 @@ function renderBulkToolbar(){
     const learned = [];
     UI.txSelected.forEach(id=>{
       const t = DB.transactions.find(x=>x.id===id);
-      if(t && !t.transferId){
+      if(t && !t.transferId && !(t.splits&&t.splits.length)){
         t.category = val;
         count++;
         if(alsoLearn){
@@ -2045,6 +2075,8 @@ function renderTxBody(){
 function handleTxBodyClick(e){
   const badge = e.target.closest('[data-action="open-cat-picker"]');
   if(badge){ openInlineCategoryPicker(badge); return; }
+  const splitBtn = e.target.closest('[data-action="open-split"]');
+  if(splitBtn){ openSplitModal(splitBtn.dataset.id); return; }
   const editBtn = e.target.closest('[data-action="edit-tx"]');
   if(editBtn){ openTxModal(editBtn.dataset.id); return; }
   const delBtn = e.target.closest('[data-action="delete-tx"]');
@@ -2116,22 +2148,26 @@ function rowHTML_tx(t){
       </td>
     </tr>`;
   }
+  const isSplit = t.splits && t.splits.length;
   const kind = categoryKind(t.category);
-  const stampClass = !t.category ? 'c-none' : (kind==='income' ? 'c-income' : 'c-expense');
+  const stampClass = isSplit ? 'c-split' : (!t.category ? 'c-none' : (kind==='income' ? 'c-income' : 'c-expense'));
+  const catLabel = isSplit ? `Split (${t.splits.length})` : (t.category || 'Uncategorised');
   return `<tr>
     <td><input type="checkbox" class="tx-row-check" data-id="${t.id}" ${checked}></td>
     <td class="num">${ukDate(t.date)}</td>
     <td class="desc" title="${escAttr(t.description)}">${escHTML(t.description)}${t.excluded ? ' <span class="stamp-mini" title="Not counted in income/spending totals">excl.</span>' : ''}</td>
-    <td class="cat-cell"><span class="stamp ${stampClass} cat-badge-clickable" data-action="open-cat-picker" data-id="${t.id}" title="Click to change category">${escHTML(t.category || 'Uncategorised')}</span></td>
+    <td class="cat-cell"><span class="stamp ${stampClass} cat-badge-clickable" data-action="${isSplit?'open-split':'open-cat-picker'}" data-id="${t.id}" title="${isSplit?'Click to edit split':'Click to change category'}">${escHTML(catLabel)}</span></td>
     <td>${escHTML(t.account||'—')}</td>
     <td class="amt ${t.amount>0?'income':''}">${gbp(t.amount,{signed:true})}</td>
     <td class="row-actions">
+      <button class="row-icon-btn" data-action="open-split" data-id="${t.id}" title="${isSplit?'Edit split':'Split across categories'}">${iconSplit()}</button>
       <button class="row-icon-btn" data-action="convert-transfer" data-id="${t.id}" title="Convert to transfer">${iconSwap()}</button>
       <button class="row-icon-btn" data-action="edit-tx" data-id="${t.id}" title="Edit">${iconEdit()}</button>
       <button class="row-icon-btn" data-action="delete-tx" data-id="${t.id}" title="Delete">${iconTrash()}</button>
     </td>
   </tr>`;
 }
+function iconSplit(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3v7a4 4 0 0 0 4 4h4"/><path d="M6 21v-7"/><path d="m14 10 4 4-4 4"/></svg>`; }
 function iconSwap(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>`; }
 function iconUndo(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-9.36L1 10"/></svg>`; }
 function iconEdit(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>`; }
@@ -2160,6 +2196,7 @@ function deleteTx(id){
 function openConvertToTransferModal(id){
   const t = DB.transactions.find(x=>x.id===id);
   if(!t || t.transferId) return;
+  if(t.splits && t.splits.length){ toast('Remove the split before converting this to a transfer', 'error'); return; }
   const outgoing = t.amount<0;
   openModal(`
     <div class="modal-head"><h3>Convert to transfer</h3></div>
@@ -2221,6 +2258,7 @@ function revertTransfer(id){
 function openTxModal(id){
   const t = id ? DB.transactions.find(x=>x.id===id) : null;
   const isIncome = t ? t.amount>0 : false;
+  const isSplit = !!(t && t.splits && t.splits.length);
   openModal(`
     <div class="modal-head"><h3>${t?'Edit transaction':'Add transaction'}</h3></div>
     <div class="modal-body">
@@ -2234,9 +2272,14 @@ function openTxModal(id){
       </div>
       <div class="form-grid">
         <div class="field"><label>Date</label><input type="date" id="tx-date" value="${t?t.date:todayISO()}"></div>
-        <div class="field"><label>Amount (£)</label><input type="number" id="tx-amount" min="0" step="0.01" value="${t?Math.abs(t.amount).toFixed(2):''}" placeholder="0.00"></div>
+        <div class="field"><label>Amount (£)</label><input type="number" id="tx-amount" min="0" step="0.01" value="${t?Math.abs(t.amount).toFixed(2):''}" placeholder="0.00" ${isSplit?'readonly title="This transaction is split across categories — edit amounts via Manage split"':''}></div>
         <div class="field span2" id="tx-desc-wrap"><label>Description</label><input type="text" id="tx-desc" value="${t?escAttr(t.description):''}" placeholder="e.g. Tesco Store"></div>
-        <div class="field" id="tx-category-wrap"><label>Category</label><select id="tx-category"></select></div>
+        <div class="field" id="tx-category-wrap">
+          <label>Category</label>
+          ${isSplit
+            ? `<div><span class="stamp c-split" style="display:inline-block;margin-bottom:6px;">Split (${t.splits.length})</span><br><button type="button" class="btn btn-sm" id="tx-manage-split">Manage split…</button></div>`
+            : `<select id="tx-category"></select>`}
+        </div>
         <div class="field" id="tx-account-wrap"><label>Account</label><input type="text" id="tx-account" list="account-list" value="${t?escAttr(t.account||''):'Current Account'}"></div>
         <div class="field" id="tx-from-wrap" style="display:none;"><label>From account</label><input type="text" id="tx-from-account" list="account-list" placeholder="e.g. Savings"></div>
         <div class="field" id="tx-to-wrap" style="display:none;"><label>To account</label><input type="text" id="tx-to-account" list="account-list" value="Current Account"></div>
@@ -2252,9 +2295,11 @@ function openTxModal(id){
     </div>
     <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">${t?'Save changes':'Add'}</button></div>
   `);
+  if(isSplit){ document.getElementById('tx-manage-split').onclick = ()=>{ closeModal(); openSplitModal(id); }; }
   let currentKind = isIncome ? 'income' : 'expense';
   function fillCategories(){
     const sel = document.getElementById('tx-category');
+    if(!sel) return;
     const opts = DB.categories.filter(c=>c.kind===currentKind);
     sel.innerHTML = opts.map(c=>`<option value="${escAttr(c.name)}" ${t&&t.category===c.name?'selected':''}>${escHTML(c.name)}</option>`).join('');
   }
@@ -2301,7 +2346,7 @@ function openTxModal(id){
       return;
     }
     const desc = document.getElementById('tx-desc').value.trim();
-    const category = document.getElementById('tx-category').value;
+    const category = isSplit ? t.category : document.getElementById('tx-category').value;
     const account = document.getElementById('tx-account').value.trim();
     const excluded = document.getElementById('tx-excluded').checked;
     if(!desc){
@@ -2318,11 +2363,109 @@ function openTxModal(id){
   };
 }
 
+function openSplitModal(id){
+  const t = DB.transactions.find(x=>x.id===id);
+  if(!t) return;
+  if(t.transferId){ toast('Transfers can\u2019t be split', 'error'); return; }
+  const sign = t.amount<0 ? -1 : 1;
+  const total = Math.abs(t.amount);
+  const kind = t.amount>0 ? 'income' : 'expense';
+  let rows;
+  if(t.splits && t.splits.length){
+    rows = t.splits.map(s=>({id:s.id||uid('sp'), category:s.category||'', amount:Math.abs(s.amount)}));
+  } else {
+    rows = [
+      {id:uid('sp'), category:t.category||'', amount:total},
+      {id:uid('sp'), category:'', amount:0},
+    ];
+  }
+  const wasSplit = !!(t.splits && t.splits.length);
+
+  function currentRemaining(){
+    const allocated = rows.reduce((s,r)=> s+(parseFloat(r.amount)||0), 0);
+    return Math.round((total-allocated)*100)/100;
+  }
+  function updateRemaining(){
+    const remaining = currentRemaining();
+    const el = document.getElementById('split-remaining');
+    if(el){ el.textContent = gbp(remaining); el.style.color = Math.abs(remaining)<0.005 ? 'var(--income)' : 'var(--expense)'; }
+    const saveBtn = document.getElementById('m-save');
+    if(saveBtn) saveBtn.disabled = Math.abs(remaining) >= 0.005;
+  }
+  function render(){
+    const catOpts = DB.categories.filter(c=>c.kind===kind);
+    const remaining = currentRemaining();
+    openModal(`
+      <div class="modal-head"><h3>Split transaction</h3></div>
+      <div class="modal-body">
+        <p style="margin:0 0 4px;">${escHTML(t.description)}</p>
+        <p style="color:var(--ink-soft);font-size:13px;margin:0 0 14px;">${ukDate(t.date)} · ${escHTML(t.account||'—')} · Total ${gbp(total)}</p>
+        <div id="split-rows" style="display:flex;flex-direction:column;gap:8px;">
+          ${rows.map((r,i)=>`
+            <div style="display:flex;gap:8px;align-items:center;">
+              <select class="split-cat" data-i="${i}" style="flex:1;min-width:0;">
+                <option value="">Uncategorised</option>
+                ${catOpts.map(c=>`<option value="${escAttr(c.name)}" ${r.category===c.name?'selected':''}>${escHTML(c.name)}</option>`).join('')}
+              </select>
+              <input type="number" class="split-amt" data-i="${i}" min="0" step="0.01" value="${r.amount.toFixed(2)}" style="width:100px;flex-shrink:0;">
+              <button type="button" class="row-icon-btn" data-action="split-del" data-i="${i}" title="Remove this split" ${rows.length<=2?'disabled':''}>${iconTrash()}</button>
+            </div>
+          `).join('')}
+        </div>
+        <button type="button" class="btn btn-sm" id="split-add" style="margin-top:10px;">${iconPlus()} Add another split</button>
+        <div class="qc-line qc-total" style="margin-top:14px;">
+          <span>Remaining to allocate</span>
+          <span class="num" id="split-remaining" style="color:${Math.abs(remaining)<0.005?'var(--income)':'var(--expense)'};">${gbp(remaining)}</span>
+        </div>
+      </div>
+      <div class="modal-foot">
+        ${wasSplit ? `<button class="btn" id="m-unsplit" style="margin-right:auto;">Remove split</button>` : ''}
+        <button class="btn" id="m-cancel">Cancel</button>
+        <button class="btn btn-primary" id="m-save" ${Math.abs(remaining)>=0.005?'disabled':''}>Save split</button>
+      </div>
+    `);
+    wire();
+  }
+  function wire(){
+    document.getElementById('m-cancel').onclick = closeModal;
+    document.querySelectorAll('.split-cat').forEach(sel=> sel.onchange = e=>{ rows[+e.target.dataset.i].category = e.target.value; });
+    document.querySelectorAll('.split-amt').forEach(inp=> inp.oninput = e=>{ rows[+e.target.dataset.i].amount = parseFloat(e.target.value)||0; updateRemaining(); });
+    document.querySelectorAll('[data-action="split-del"]').forEach(b=> b.onclick = e=>{
+      const i = +e.currentTarget.dataset.i;
+      if(rows.length<=2) return;
+      rows.splice(i,1);
+      render();
+    });
+    document.getElementById('split-add').onclick = ()=>{ rows.push({id:uid('sp'), category:'', amount:0}); render(); };
+    const unsplitBtn = document.getElementById('m-unsplit');
+    if(unsplitBtn) unsplitBtn.onclick = ()=>{
+      delete t.splits;
+      t.category = '';
+      scheduleSave(); closeModal(); renderContent(); renderSidebarBits();
+      toast('Split removed — pick a category for this transaction');
+    };
+    document.getElementById('m-save').onclick = ()=>{
+      if(Math.abs(currentRemaining()) >= 0.005){ toast('Amounts must add up to the total', 'error'); return; }
+      const cleanRows = rows.filter(r=> r.amount>0.004);
+      if(cleanRows.length < 2){
+        delete t.splits;
+        t.category = cleanRows[0] ? cleanRows[0].category : '';
+      } else {
+        t.splits = cleanRows.map(r=>({id:r.id, category:r.category, amount: sign*r.amount}));
+        t.category = '';
+      }
+      scheduleSave(); closeModal(); renderContent(); renderSidebarBits();
+      toast('Split saved');
+    };
+  }
+  render();
+}
+
 function autoCategoriseAll(){
   let count = 0;
   DB.transactions.forEach(t=>{
-    if(!t.category && !t.transferId){
-      const s = suggestCategory(t.description);
+    if(!t.category && !t.transferId && !(t.splits&&t.splits.length)){
+      const s = suggestCategory(t.description, t.amount);
       if(s){ t.category = s; count++; }
     }
   });
@@ -2335,8 +2478,8 @@ function reapplyRulesToAll(){
   const scope = filteredSortedTx();
   const changes = [];
   scope.forEach(t=>{
-    if(t.transferId) return;
-    const suggested = suggestCategory(t.description);
+    if(t.transferId || (t.splits&&t.splits.length)) return;
+    const suggested = suggestCategory(t.description, t.amount);
     if(suggested && suggested !== t.category){
       changes.push({id:t.id, description:t.description, from:t.category||'Uncategorised', to:suggested});
     }
@@ -2366,11 +2509,101 @@ function reapplyRulesToAll(){
 }
 
 /* =========================================================
+   DUPLICATE DETECTION
+   ========================================================= */
+function iconLayers(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>`; }
+// Groups likely-duplicate transactions: an EXACT match (same date, amount,
+// and description) is very high confidence — usually a statement imported
+// twice. A LIKELY match (same amount, same cleaned merchant name, dates
+// within 3 days) catches the same transaction entered once manually and
+// once via a later import with a slightly different posted date. Transfers
+// are excluded since a transfer pair is *supposed* to have a mirrored
+// amount on a different account — that's not a duplicate, it's by design.
+function findDuplicateGroups(){
+  const list = DB.transactions.filter(t=>!t.transferId);
+  const exactMap = new Map();
+  list.forEach(t=>{
+    const key = t.date+'|'+t.amount.toFixed(2)+'|'+t.description.trim().toUpperCase()+'|'+(t.account||'');
+    if(!exactMap.has(key)) exactMap.set(key, []);
+    exactMap.get(key).push(t);
+  });
+  const used = new Set();
+  const groups = [];
+  exactMap.forEach(group=>{
+    if(group.length>1){
+      groups.push({type:'exact', items:group});
+      group.forEach(t=>used.add(t.id));
+    }
+  });
+  const remaining = list.filter(t=>!used.has(t.id));
+  const likelyMap = new Map();
+  remaining.forEach(t=>{
+    const key = t.amount.toFixed(2)+'|'+merchantKeyFor(t.description)+'|'+(t.account||'');
+    if(!likelyMap.has(key)) likelyMap.set(key, []);
+    likelyMap.get(key).push(t);
+  });
+  likelyMap.forEach(group=>{
+    if(group.length<2) return;
+    group.sort((a,b)=>a.date.localeCompare(b.date));
+    // Cluster within the group by date proximity (<=3 days apart) rather than
+    // treating the whole group as one cluster, in case the same merchant/amount
+    // recurs months apart (e.g. a regular £30 top-up) — that's not a duplicate.
+    let cluster = [group[0]];
+    for(let i=1;i<group.length;i++){
+      if(Math.abs(daysBetween(group[i-1].date, group[i].date)) <= 3){
+        cluster.push(group[i]);
+      } else {
+        if(cluster.length>1) groups.push({type:'likely', items:cluster.slice()});
+        cluster = [group[i]];
+      }
+    }
+    if(cluster.length>1) groups.push({type:'likely', items:cluster.slice()});
+  });
+  return groups;
+}
+function openDuplicatesModal(){
+  const groups = findDuplicateGroups();
+  if(!groups.length){ toast('No likely duplicates found'); return; }
+  const totalExtra = groups.reduce((s,g)=> s+(g.items.length-1), 0);
+  openModal(`
+    <div class="modal-head"><h3>Possible duplicate transactions</h3></div>
+    <div class="modal-body">
+      <p style="margin:0 0 10px;color:var(--ink-soft);font-size:13px;">Found ${groups.length} group${groups.length===1?'':'s'} — ${totalExtra} transaction${totalExtra===1?'':'s'} could be removed if these are true duplicates. Nothing is deleted until you tick a row and confirm below; the first entry in each group is kept by default.</p>
+      <div id="dupe-groups" style="max-height:360px;overflow:auto;display:flex;flex-direction:column;gap:12px;"></div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="m-cancel">Close</button><button class="btn btn-primary" id="m-confirm">Delete selected</button></div>
+  `, {wide:true});
+  const host = document.getElementById('dupe-groups');
+  host.innerHTML = groups.map((g,gi)=> `
+    <div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;">
+      <div style="font-size:11px;font-weight:600;color:${g.type==='exact'?'var(--expense)':'var(--gold)'};margin-bottom:6px;">${g.type==='exact' ? 'EXACT MATCH — same date, amount &amp; description' : 'LIKELY MATCH — same amount &amp; merchant, dates within a few days'}</div>
+      ${g.items.map((t,ti)=> `
+        <label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12.5px;cursor:pointer;">
+          <input type="checkbox" class="dupe-check" data-gi="${gi}" data-id="${t.id}" ${ti>0?'checked':''}>
+          <span style="flex:1;">${escHTML(t.description)} <span style="color:var(--ink-faint);">· ${escHTML(t.account||'—')}${(t.splits&&t.splits.length) ? ` · Split (${t.splits.length})` : (t.category?` · ${escHTML(t.category)}`:'')}</span></span>
+          <span style="color:var(--ink-faint);">${ukDate(t.date)}</span>
+          <span class="num" style="font-weight:600;min-width:70px;text-align:right;">${gbp(t.amount,{signed:true})}</span>
+        </label>
+      `).join('')}
+    </div>
+  `).join('');
+  document.getElementById('m-cancel').onclick = closeModal;
+  document.getElementById('m-confirm').onclick = ()=>{
+    const ids = Array.from(host.querySelectorAll('.dupe-check:checked')).map(cb=>cb.dataset.id);
+    if(!ids.length){ toast('Nothing selected', 'error'); return; }
+    DB.transactions = DB.transactions.filter(t=>!ids.includes(t.id));
+    scheduleSave(); closeModal(); renderContent(); renderSidebarBits();
+    toast(`Deleted ${ids.length} duplicate transaction${ids.length===1?'':'s'}`);
+  };
+}
+
+/* =========================================================
    SPENDING PLAN
    ========================================================= */
 function computeManualRegular(){
   const now = new Date();
   const results = [];
+  const expandedTx = expandSplits(DB.transactions);
   DB.regularCategories.forEach(catName=>{
     const cat = DB.categories.find(c=>c.name===catName);
     if(!cat) return;
@@ -2381,7 +2614,7 @@ function computeManualRegular(){
       const base = new Date(now.getFullYear(), now.getMonth()-i, 1);
       const from = base.toISOString().slice(0,10);
       const to = new Date(base.getFullYear(), base.getMonth()+1, 0).toISOString().slice(0,10);
-      const list = DB.transactions.filter(t=> t.category===catName && t.date>=from && t.date<=to);
+      const list = expandedTx.filter(t=> t.category===catName && t.date>=from && t.date<=to);
       if(list.length) monthlyTotals.push(list.reduce((s,t)=> s+Math.abs(t.amount), 0));
     }
     if(!monthlyTotals.length){
@@ -2390,7 +2623,7 @@ function computeManualRegular(){
     }
     const avg = monthlyTotals.reduce((s,v)=>s+v,0) / monthlyTotals.length;
     const thisMonthFrom = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10);
-    const postedThisMonth = DB.transactions.some(t=> t.category===catName && t.date>=thisMonthFrom);
+    const postedThisMonth = expandedTx.some(t=> t.category===catName && t.date>=thisMonthFrom);
     results.push({
       key: 'manual:'+catName,
       description: catName,
@@ -2442,11 +2675,11 @@ function planNumbers(){
    INVESTMENTS
    ========================================================= */
 function investExpenseList(list){
-  return list.filter(t=> t.amount<0 && countsTowardTotals(t) && DB.investmentCategories.includes(t.category));
+  return expandSplits(list).filter(t=> t.amount<0 && countsTowardTotals(t) && DB.investmentCategories.includes(t.category));
 }
 function sumInvest(list){ return investExpenseList(list).reduce((s,t)=> s+Math.abs(t.amount), 0); }
 function discretionaryExpenseList(list){
-  return list.filter(t=> t.amount<0 && countsTowardTotals(t) && DB.discretionaryCategories.includes(t.category));
+  return expandSplits(list).filter(t=> t.amount<0 && countsTowardTotals(t) && DB.discretionaryCategories.includes(t.category));
 }
 function sumDiscretionary(list){ return discretionaryExpenseList(list).reduce((s,t)=> s+Math.abs(t.amount), 0); }
 
@@ -2974,7 +3207,7 @@ function renderCatList(){
     const cats = DB.categories.filter(c=>c.kind===kind);
     return `<div style="margin-bottom:6px;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-faint);font-weight:700;margin:8px 2px 4px;">${label}</div>` +
       cats.map(cat=>{
-        const used = DB.transactions.filter(t=>t.category===cat.name).length;
+        const used = DB.transactions.filter(t=>t.category===cat.name || (t.splits&&t.splits.some(s=>s.category===cat.name))).length;
         const isRegular = DB.regularCategories.includes(cat.name);
         const isDiscretionary = DB.discretionaryCategories.includes(cat.name);
         const isInvestment = DB.investmentCategories.includes(cat.name);
@@ -3067,7 +3300,7 @@ const RULE_NOISE_WORDS = new Set([
 // create redundant or low-quality rules.
 function learnRuleFromTransaction(t){
   if(!t || !t.category) return null;
-  if(suggestCategory(t.description)) return null;
+  if(suggestCategory(t.description, t.amount)) return null;
   const word = merchantKeyFor(t.description).toUpperCase().replace(/[^A-Z0-9 ]/g,'').trim();
   if(word.length < 3) return null;
   if(DB.rules.some(r=> r.keyword.toUpperCase()===word)) return null;
@@ -3089,10 +3322,13 @@ function renderRuleList(){
   const summary = riskyCount ? `<div style="display:flex;align-items:center;gap:6px;color:var(--gold);font-size:11.5px;font-weight:600;margin-bottom:8px;">${iconWarnTriangle()} ${riskyCount} rule${riskyCount===1?'':'s'} look${riskyCount===1?'s':''} generic — worth a quick review (hover the ${'\u26A0'} icon)</div>` : '';
   host.innerHTML = summary + DB.rules.map((r,i)=>{
     const reason = riskyRuleReason(r.keyword);
+    const dirBadge = r.direction==='out' ? `<span class="stamp-mini" style="color:var(--expense);background:var(--expense-wash);">money out only</span>`
+      : r.direction==='in' ? `<span class="stamp-mini" style="color:var(--income);background:var(--income-wash);">money in only</span>` : '';
     return `
     <div class="rule-row">
       <span>if description contains</span>
       <span class="kw">${escHTML(r.keyword)}</span>
+      ${dirBadge}
       ${reason ? `<span class="rule-risk-flag" style="color:var(--gold);cursor:help;" title="${escAttr(reason)}">${iconWarnTriangle()}</span>` : ''}
       <span class="arrow">→</span>
       <span class="rc"><strong>${escHTML(r.category)}</strong></span>
@@ -3107,7 +3343,7 @@ function renderRuleList(){
   });
 }
 function deleteCategory(name){
-  const used = DB.transactions.filter(t=>t.category===name).length;
+  const used = DB.transactions.filter(t=>t.category===name || (t.splits&&t.splits.some(s=>s.category===name))).length;
   openModal(`
     <div class="modal-head"><h3>Delete “${escHTML(name)}”?</h3></div>
     <div class="modal-body"><p style="margin:0;color:var(--ink-soft);font-size:13px;">${used ? `${used} transaction${used===1?'':'s'} using this category will become Uncategorised.` : 'This category is not currently used.'}</p></div>
@@ -3116,7 +3352,10 @@ function deleteCategory(name){
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('m-confirm').onclick = ()=>{
     DB.categories = DB.categories.filter(c=>c.name!==name);
-    DB.transactions.forEach(t=>{ if(t.category===name) t.category=''; });
+    DB.transactions.forEach(t=>{
+      if(t.category===name) t.category='';
+      if(t.splits) t.splits.forEach(s=>{ if(s.category===name) s.category=''; });
+    });
     DB.rules = DB.rules.filter(r=>r.category!==name);
     DB.regularCategories = DB.regularCategories.filter(n=>n!==name);
     DB.discretionaryCategories = DB.discretionaryCategories.filter(n=>n!==name);
@@ -3156,12 +3395,22 @@ function openCategoryModal(){
 function openRuleModal(index){
   const isEdit = index!=null && index>=0;
   const rule = isEdit ? DB.rules[index] : null;
+  const dir = rule?.direction || 'any';
   openModal(`
     <div class="modal-head"><h3>${isEdit?'Edit':'Add'} auto-tagging rule</h3></div>
     <div class="modal-body">
       <div class="form-grid">
         <div class="field span2"><label>If description contains</label><input type="text" id="r-kw" value="${rule?escAttr(rule.keyword):''}" placeholder="e.g. TESCO"></div>
         <div class="field span2"><label>Assign category</label><select id="r-cat">${categoryOptionsHTML(rule?rule.category:'', {includeUncategorized:false})}</select></div>
+        <div class="field span2">
+          <label>Applies to</label>
+          <select id="r-dir">
+            <option value="any" ${dir==='any'?'selected':''}>Any amount</option>
+            <option value="out" ${dir==='out'?'selected':''}>Money out only (expenses)</option>
+            <option value="in" ${dir==='in'?'selected':''}>Money in only (income)</option>
+          </select>
+          <p style="font-size:11px;color:var(--ink-faint);margin:4px 2px 0;">Use this if the same wording shows up for both directions — e.g. a transfer to and from savings — and each direction should get a different category.</p>
+        </div>
       </div>
     </div>
     <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">${isEdit?'Save changes':'Add rule'}</button></div>
@@ -3170,25 +3419,28 @@ function openRuleModal(index){
   document.getElementById('m-save').onclick = ()=>{
     const kw = document.getElementById('r-kw').value.trim();
     const cat = document.getElementById('r-cat').value;
+    const direction = document.getElementById('r-dir').value;
     if(!kw){ toast('Enter text to match', 'error'); return; }
     if(isEdit){
-      DB.rules[index] = {keyword:kw, category:cat};
+      DB.rules[index] = {keyword:kw, category:cat, direction};
     } else {
-      DB.rules.unshift({keyword:kw, category:cat});
+      DB.rules.unshift({keyword:kw, category:cat, direction});
     }
-    const applied = applyRuleToUncategorised(kw, cat);
+    const applied = applyRuleToUncategorised(kw, cat, direction);
     scheduleSave(); closeModal(); renderCategories(document.getElementById('content')); renderSidebarBits();
     toast(applied ? `Rule ${isEdit?'updated':'added'} — applied to ${applied} existing uncategorised transaction${applied===1?'':'s'}` : `Rule ${isEdit?'updated':'added'}`);
   };
 }
-function applyRuleToUncategorised(keyword, category){
+function applyRuleToUncategorised(keyword, category, direction){
   const kw = keyword.toUpperCase();
   let count = 0;
   DB.transactions.forEach(t=>{
-    if(!t.category && t.description.toUpperCase().includes(kw)){
-      t.category = category;
-      count++;
-    }
+    if(t.category || t.transferId || (t.splits&&t.splits.length)) return;
+    if(!t.description.toUpperCase().includes(kw)) return;
+    if(direction==='out' && !(t.amount<0)) return;
+    if(direction==='in' && !(t.amount>0)) return;
+    t.category = category;
+    count++;
   });
   return count;
 }
@@ -3468,7 +3720,7 @@ function buildParsedRows(){
     return {
       rowId: 'imp_'+i,
       date: p.date, description: p.description, amount: p.amount,
-      category: suggestCategory(p.description),
+      category: suggestCategory(p.description, p.amount),
       duplicate: existingKeys.has(key),
       include: !existingKeys.has(key),
     };

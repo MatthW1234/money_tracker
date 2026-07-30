@@ -122,3 +122,24 @@ currently on that device, so export first if you want to keep both.
    where possible, duplicates already in your ledger are flagged and
    unticked automatically. Assign categories individually or in bulk,
    then confirm.
+
+## Splitting a transaction across categories
+
+If a single transaction covers more than one category — a supermarket
+trip that's part groceries, part household goods — click the split icon
+on that row in **Transactions**. Assign an amount and category to each
+piece; they must add up to the transaction's total before you can save.
+Split transactions show a "Split (n)" badge instead of a single category,
+are counted correctly (per category) everywhere the app totals things up
+— budgets, the dashboard, Spending Plan, Investments — and are excluded
+from auto-categorisation and recurring-transaction detection, since those
+need one category per transaction to work from. Use **Remove split** to
+undo it and go back to a single category.
+
+## Finding duplicate transactions
+
+**Find duplicates** on the Transactions tab checks your whole ledger (not
+just what you're about to import) for likely duplicate entries — exact
+matches on date/amount/description, and near-matches with the same
+amount and merchant a few days apart. Nothing is deleted until you tick
+which copies to remove and confirm.
