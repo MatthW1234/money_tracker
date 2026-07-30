@@ -893,10 +893,13 @@ function categoryOptionsHTML(selected, opts){
 }
 function suggestCategory(description){
   const desc = (description||'').toUpperCase();
+  let best = null;
   for(const r of DB.rules){
-    if(r.keyword && desc.includes(r.keyword.toUpperCase())) return r.category;
+    if(r.keyword && desc.includes(r.keyword.toUpperCase())){
+      if(!best || r.keyword.length > best.keyword.length) best = r;
+    }
   }
-  return '';
+  return best ? best.category : '';
 }
 
 /* ---------- calc helpers ---------- */
@@ -3148,6 +3151,7 @@ function newImportState(){
     dateFormat: 'DMY',
     parsed: [],
     rememberRules: true,
+    learnedRules: [],
   };
 }
 
@@ -3529,6 +3533,7 @@ function confirmImport(){
   const toImport = st.parsed.filter(p=>p.include && p.date);
   if(!toImport.length){ toast('No rows selected to import', 'error'); return; }
   const newRuleKeywords = new Set(DB.rules.map(r=>r.keyword.toUpperCase()));
+  const learnedRules = [];
   toImport.forEach(p=>{
     DB.transactions.push({
       id: uid('tx'), date:p.date, description:p.description, amount:p.amount,
@@ -3537,10 +3542,15 @@ function confirmImport(){
     if(st.rememberRules && p.category){
       const already = suggestCategory(p.description);
       if(!already){
-        const word = (p.description.trim().split(/\s+/)[0]||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+        // Reuse the same noise-prefix/suffix stripping used for merchant grouping
+        // and recurring detection, rather than just grabbing the first word — bank
+        // descriptions usually start with a generic prefix like "CARD PAYMENT TO"
+        // or "DIRECT DEBIT", so the first word alone makes a poor, over-broad rule.
+        const word = merchantKeyFor(p.description).toUpperCase().replace(/[^A-Z0-9 ]/g,'').trim();
         if(word.length>=3 && !newRuleKeywords.has(word)){
           DB.rules.unshift({keyword:word, category:p.category});
           newRuleKeywords.add(word);
+          learnedRules.push({keyword:word, category:p.category});
         }
       }
     }
@@ -3556,16 +3566,24 @@ function confirmImport(){
   scheduleSave();
   st.step = 4;
   st.importedCount = toImport.length;
+  st.learnedRules = learnedRules;
   renderImport(document.getElementById('content'));
   renderSidebarBits();
 }
 function renderImportStep4(body){
   const st = UI.importState;
+  const learned = st.learnedRules || [];
   body.innerHTML = `
     <div class="empty-state panel" style="padding:60px 20px;">
       <svg viewBox="0 0 24 24" fill="none" stroke="var(--income)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
       <h4>Import complete</h4>
       <p>${st.importedCount} transaction${st.importedCount===1?'':'s'} added to your ledger.</p>
+      ${learned.length ? `
+        <div style="text-align:left; max-width:420px; margin:16px auto 0; background:var(--surface-2); border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px;">
+          <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:6px;">Learned ${learned.length} new auto-tagging rule${learned.length===1?'':'s'} from your category choices:</div>
+          ${learned.map(r=> `<div style="font-size:12px;color:var(--ink);padding:3px 0;">"${escHTML(r.keyword)}" → ${escHTML(r.category)}</div>`).join('')}
+          <div style="font-size:11px;color:var(--ink-faint);margin-top:6px;">Wrong? Edit or delete these any time under Categories → Auto-tagging rules.</div>
+        </div>` : ''}
       <div style="display:flex;gap:10px;justify-content:center;margin-top:16px;">
         <button class="btn" id="btn-import-more">Import another file</button>
         <button class="btn btn-primary" id="btn-goto-tx">View transactions →</button>
