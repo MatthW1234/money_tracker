@@ -1325,7 +1325,7 @@ function renderDashboard(c){
 
     <div class="panel" style="margin-top:16px;">
       <div class="panel-head"><div class="panel-title">Cash flow<small>${range.label} · where income actually went</small></div></div>
-      <div class="chart-wrap"><canvas id="cashflow-chart"></canvas></div>
+      <div class="chart-wrap"><div id="cashflow-sankey" style="width:100%;height:100%;"></div></div>
     </div>
 
     <div class="grid-2" style="margin-top:16px;">
@@ -1743,9 +1743,8 @@ function drawBalanceChart(){
   });
 }
 function drawCashFlowChart(list, income){
-  const ctx = document.getElementById('cashflow-chart');
-  if(!ctx) return;
-  if(UI.charts.cashflow) UI.charts.cashflow.destroy();
+  const host = document.getElementById('cashflow-sankey');
+  if(!host) return;
   const byCat = {};
   expandSplits(list).forEach(t=>{
     if(t.amount<0 && countsTowardTotals(t)){
@@ -1756,55 +1755,57 @@ function drawCashFlowChart(list, income){
   const sorted = Object.entries(byCat).sort((a,b)=> b[1]-a[1]);
   const top = sorted.slice(0,5);
   const otherSum = sorted.slice(5).reduce((s,e)=> s+e[1], 0);
+  const totalExpense = sorted.reduce((s,e)=> s+e[1], 0);
+  const net = income - totalExpense;
 
-  const bars = [{ label:'Income', from:0, to:income, kind:'income' }];
-  let running = income;
-  top.forEach(([name,amt])=>{
-    bars.push({ label:name, from:running, to:running-amt, kind:'expense' });
-    running -= amt;
-  });
-  if(otherSum>0){
-    bars.push({ label:'Other', from:running, to:running-otherSum, kind:'expense' });
-    running -= otherSum;
-  }
-  bars.push({ label:'Net', from:0, to:running, kind: running>=0?'net-pos':'net-neg' });
-
-  if(income<=0 && bars.length<=1){
-    ctx.parentElement.innerHTML = `<div class="empty-state" style="padding:30px 10px;"><h4>No cash flow yet</h4><p style="font-size:12.5px;">Income and spending for this period will appear here.</p></div>`;
+  if(income<=0 && !top.length){
+    host.innerHTML = `<div class="empty-state" style="padding:30px 10px;"><h4>No cash flow yet</h4><p style="font-size:12.5px;">Income and spending for this period will appear here.</p></div>`;
     return;
   }
 
-  const base = bars.map(b=> Math.min(b.from,b.to));
-  const range = bars.map(b=> Math.abs(b.to-b.from));
-  const colors = bars.map(b=> b.kind==='income' ? '#1E8E5A' : b.kind==='net-pos' ? '#0B6E4F' : b.kind==='net-neg' ? '#B3392E' : '#C1443D');
+  const buckets = top.map(([name,amt],i)=> ({label:name, value:amt, color:DONUT_COLORS[i%DONUT_COLORS.length]}));
+  if(otherSum>0.005) buckets.push({label:'Other', value:otherSum, color:'#9CA3AF'});
+  if(net>0.005) buckets.push({label:'Net (saved)', value:net, color:'#1E8E5A'});
+  const validBuckets = buckets.filter(b=>b.value>0.005);
 
-  UI.charts.cashflow = new Chart(ctx, {
-    type:'bar',
-    data:{
-      labels: bars.map(b=>b.label),
-      datasets:[
-        { data:base, backgroundColor:'transparent', stack:'s' },
-        { data:range, backgroundColor:colors, stack:'s', borderRadius:3 },
-      ]
-    },
-    options:{
-      responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{display:false},
-        tooltip:{ callbacks:{
-          title:(items)=> bars[items[0].dataIndex].label,
-          label:(item)=>{
-            if(item.datasetIndex===0) return undefined;
-            const b = bars[item.dataIndex];
-            const delta = b.to-b.from;
-            return ` ${delta>=0?'+':''}${gbp(delta)}`;
-          }
-        } } },
-      scales:{
-        y:{ stacked:true, ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}}, grid:{color:'#E7EBE3'} },
-        x:{ stacked:true, grid:{display:false}, ticks:{font:{size:10.5}} }
-      }
-    }
+  if(!validBuckets.length){
+    host.innerHTML = `<div class="empty-state" style="padding:30px 10px;"><h4>No cash flow yet</h4><p style="font-size:12.5px;">Income and spending for this period will appear here.</p></div>`;
+    return;
+  }
+
+  const total = validBuckets.reduce((s,b)=>s+b.value,0);
+  const W = 680, H = 260;
+  const padTop = 14, leftX = 96, nodeW = 14, rightX = 470;
+  const usableH = H - padTop*2;
+  const gap = 7;
+  const scale = (usableH - gap*(validBuckets.length-1)) / total;
+
+  let leftCursor = padTop, rightCursor = padTop;
+  const ribbons = [], rightNodes = [];
+  validBuckets.forEach(b=>{
+    const bh = Math.max(2, b.value*scale);
+    ribbons.push({y1:leftCursor, h1:bh, y2:rightCursor, h2:bh, color:b.color});
+    rightNodes.push({y:rightCursor, h:bh, label:b.label, value:b.value, color:b.color});
+    leftCursor += bh;
+    rightCursor += bh + gap;
   });
+  const leftTotalH = leftCursor - padTop;
+  const leftMidY = padTop + leftTotalH/2;
+
+  host.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:100%;" preserveAspectRatio="xMidYMid meet">
+      ${ribbons.map(r=> `<path d="${sankeyRibbonPath(leftX+nodeW, r.y1, r.h1, rightX, r.y2, r.h2)}" fill="${r.color}" opacity="0.28"></path>`).join('')}
+      <rect x="${leftX}" y="${padTop}" width="${nodeW}" height="${leftTotalH}" rx="3" fill="var(--ink)"></rect>
+      <text x="${leftX-8}" y="${leftMidY-6}" text-anchor="end" font-size="12" font-weight="600" fill="var(--ink)">Income</text>
+      <text x="${leftX-8}" y="${leftMidY+10}" text-anchor="end" font-size="11" fill="var(--ink-faint)">${escHTML(gbp(income))}</text>
+      ${rightNodes.map(n=> `
+        <rect x="${rightX}" y="${n.y}" width="${nodeW}" height="${n.h}" rx="3" fill="${n.color}"></rect>
+        <text x="${rightX+nodeW+8}" y="${n.y+n.h/2-4}" font-size="12" font-weight="600" fill="var(--ink)">${escHTML(n.label)}</text>
+        <text x="${rightX+nodeW+8}" y="${n.y+n.h/2+12}" font-size="11" fill="var(--ink-faint)">${escHTML(gbp(n.value))}</text>
+      `).join('')}
+    </svg>
+    ${net<-0.005 ? `<p style="font-size:11.5px;color:var(--expense);font-weight:600;margin:8px 2px 0;">Spending exceeded income this period by ${gbp(Math.abs(net))} — a diagram can't show a negative flow, so that shortfall isn't pictured above.</p>` : ''}
+  `;
 }
 function drawTrendChart(){
   const buckets = trendBuckets();
@@ -2812,6 +2813,15 @@ function renderInvestments(c){
   drawInvestRateChart();
 }
 function iconInvest(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" width="40" height="40"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>`; }
+// Generic single-source, multi-target Sankey ribbon path — a smooth curve
+// connecting a vertical band on the left to a vertical band on the right.
+// Shared by any Sankey diagram in the app; hand-rolled as inline SVG rather
+// than pulling in a charting plugin, since a source-fans-out-to-targets shape
+// is simple enough that this is less code and less risk than a new dependency.
+function sankeyRibbonPath(x1,y1,h1,x2,y2,h2){
+  const midX = (x1+x2)/2;
+  return `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2} L${x2},${y2+h2} C${midX},${y2+h2} ${midX},${y1+h1} ${x1},${y1+h1} Z`;
+}
 function drawInvestContribChart(){
   const series = investmentMonthlySeries();
   const ctx = document.getElementById('invest-contrib-chart');
