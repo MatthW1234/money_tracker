@@ -1948,15 +1948,27 @@ function drawCashFlowChart(list, income){
 
   const leftNodes = layoutSankeyColumn(incomeBuckets, usableH, gap, minNodeH);
   const rightNodes = layoutSankeyColumn(expenseBuckets, usableH, gap, minNodeH);
-  const leftTotalH = leftNodes.length ? leftNodes[leftNodes.length-1].y + leftNodes[leftNodes.length-1].h : 0;
-  const rightTotalH = rightNodes.length ? rightNodes[rightNodes.length-1].y + rightNodes[rightNodes.length-1].h : 0;
-  const midH = Math.max(leftTotalH, rightTotalH);
+  // The two side columns space their nodes apart with a gap; the middle
+  // "Income" bar is a single continuous rect, so where each ribbon actually
+  // attaches to it has to be packed with no gaps between segments. That
+  // gapped-vs-packed mismatch is what makes the ribbons visibly diverge and
+  // flow rather than run flat — without it, a ribbon whose source and target
+  // happen to share the same proportional slot ends up perfectly horizontal.
+  function packNoGap(nodes){
+    let cursor = 0;
+    return nodes.map(n=>{ const p = {y:cursor, h:n.h}; cursor += n.h; return p; });
+  }
+  const leftAttach = packNoGap(leftNodes);
+  const rightAttach = packNoGap(rightNodes);
+  const leftPackedTotal = leftAttach.length ? leftAttach[leftAttach.length-1].y + leftAttach[leftAttach.length-1].h : 0;
+  const rightPackedTotal = rightAttach.length ? rightAttach[rightAttach.length-1].y + rightAttach[rightAttach.length-1].h : 0;
+  const midH = Math.max(leftPackedTotal, rightPackedTotal);
   const opacity = isDarkMode() ? 0.4 : 0.28;
 
   host.innerHTML = `
     <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:100%;" preserveAspectRatio="xMidYMid meet">
-      ${leftNodes.map(n=> `<path d="${sankeyRibbonPath(col0X+nodeW, padTop+n.y, n.h, col1X, padTop+n.y, n.h)}" fill="${n.color}" opacity="${opacity}"></path>`).join('')}
-      ${rightNodes.map(n=> `<path d="${sankeyRibbonPath(col1X+nodeW, padTop+n.y, n.h, col2X, padTop+n.y, n.h)}" fill="${n.color}" opacity="${opacity}"></path>`).join('')}
+      ${leftNodes.map((n,i)=> `<path d="${sankeyRibbonPath(col0X+nodeW, padTop+n.y, n.h, col1X, padTop+leftAttach[i].y, leftAttach[i].h)}" fill="${n.color}" opacity="${opacity}"></path>`).join('')}
+      ${rightNodes.map((n,i)=> `<path d="${sankeyRibbonPath(col1X+nodeW, padTop+rightAttach[i].y, rightAttach[i].h, col2X, padTop+n.y, n.h)}" fill="${n.color}" opacity="${opacity}"></path>`).join('')}
       ${leftNodes.map(n=> `
         <rect x="${col0X}" y="${padTop+n.y}" width="${nodeW}" height="${n.h}" rx="3" fill="${n.color}"></rect>
         <text x="${col0X-8}" y="${padTop+n.y+n.h/2-4}" text-anchor="end" font-size="13" font-weight="600" fill="var(--ink)">${escHTML(n.label)}</text>
