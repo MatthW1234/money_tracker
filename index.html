@@ -566,6 +566,10 @@ textarea{ resize:vertical; min-height:60px; }
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>
         <span class="lbl">Investments</span>
       </button>
+      <button class="nav-item" data-tab="insights">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <span class="lbl">Insights</span>
+      </button>
     </nav>
     <div class="sidebar-foot">
       <div class="balance-chip">
@@ -1177,6 +1181,47 @@ function detectRecurring(){
   });
   return results.sort((a,b)=> a.amount - b.amount);
 }
+// detectRecurring() clusters by amount similarity first, which is right for
+// its own purpose (matching "the same regular payment") but means a bill
+// whose price actually changed gets split into two unrelated clusters
+// rather than recognised as one bill that crept up. This groups by
+// description only and compares early vs recent amounts directly.
+function detectBillCreep(){
+  const byDesc = {};
+  DB.transactions.forEach(t=>{
+    if(!countsTowardTotals(t) || (t.splits && t.splits.length)) return;
+    if(t.amount>=0) return;
+    const key = normalizeDescForRecurring(t.description);
+    if(!key) return;
+    (byDesc[key] = byDesc[key] || []).push(t);
+  });
+  const results = [];
+  Object.entries(byDesc).forEach(([descKey, txs])=>{
+    if(txs.length < 3) return;
+    const byDate = [...txs].sort((a,b)=> a.date.localeCompare(b.date));
+    const gaps = [];
+    for(let i=1;i<byDate.length;i++) gaps.push(daysBetween(byDate[i-1].date, byDate[i].date));
+    const avgGap = gaps.reduce((s,g)=>s+g,0)/gaps.length;
+    // Looser than detectRecurring's window — creep detection just needs
+    // "roughly monthly", not a strictly unbroken run.
+    const plausible = gaps.every(g=> g>=15 && g<=60) && avgGap>=20 && avgGap<=40;
+    if(!plausible) return;
+    const n = Math.min(2, Math.floor(byDate.length/2)) || 1;
+    const avgOf = arr => arr.reduce((s,t)=>s+Math.abs(t.amount),0)/arr.length;
+    const firstAmt = avgOf(byDate.slice(0, n));
+    const lastAmt = avgOf(byDate.slice(-n));
+    const increase = lastAmt - firstAmt;
+    const pct = firstAmt>0 ? (increase/firstAmt*100) : 0;
+    if(increase <= 1 || pct < 5) return; // ignore rounding noise / trivial changes
+    const last = byDate[byDate.length-1];
+    results.push({
+      description: last.description, category: last.category,
+      firstAmt, lastAmt, increase, pct,
+      firstDate: byDate[0].date, lastDate: last.date, occurrences: byDate.length,
+    });
+  });
+  return results.sort((a,b)=> b.pct-a.pct);
+}
 function periodRange(period){
   const now = new Date();
   if(period==='month'){
@@ -1272,6 +1317,7 @@ const UI = {
   charts: {},
   importState: null,
   investPeriod: 'month',
+  insightsPeriod: 'month',
   lastUndo: null,
 };
 
@@ -1306,6 +1352,7 @@ const NAV_ICONS_TITLE = {
   categories: ['Categories','Manage the groups used across your dashboard and imports, and the auto-tagging rules.'],
   plan: ['Spending Plan','What you can actually afford, based on your balance and regular bills.'],
   investments: ['Investments','How much you\u2019re putting away, and how much more room you likely have.'],
+  insights: ['Insights','Patterns in your spending that a single total won\u2019t show you.'],
 };
 
 function setTab(tab){
@@ -1368,6 +1415,7 @@ function renderContent(){
   else if(UI.tab==='categories') renderCategories(c);
   else if(UI.tab==='plan') renderPlan(c);
   else if(UI.tab==='investments') renderInvestments(c);
+  else if(UI.tab==='insights') renderInsights(c);
 }
 
 /* =========================================================
@@ -1588,7 +1636,7 @@ function renderDashboard(c){
   drawYTDChart();
   renderMovers(list);
   renderMerchants(merchants);
-  if(showBudgets) renderBudgets(list, budgetEntries);
+  if(showBudgets) renderBudgets(list, budgetEntries, range);
   if(showSavingsOpps) renderSavingsOpportunities(savingsOpps);
   if(showCompare) renderCompareTable(list, prevList);
 }
@@ -1679,24 +1727,49 @@ function computeSavingsOpportunities(list, range){
   });
   return results.sort((a,b)=> b.diff-a.diff);
 }
-function renderBudgets(list, budgetEntries){
+function monthPaceInfo(range){
+  const from = new Date(range.from+'T00:00:00');
+  const to = new Date(range.to+'T00:00:00');
+  const today = new Date(todayISO()+'T00:00:00');
+  const totalDays = Math.round((to-from)/86400000)+1;
+  let elapsedDays;
+  if(today < from) elapsedDays = 0;
+  else if(today > to) elapsedDays = totalDays;
+  else elapsedDays = Math.round((today-from)/86400000)+1;
+  return { totalDays, elapsedDays, pacePct: totalDays>0 ? (elapsedDays/totalDays*100) : 0 };
+}
+function renderBudgets(list, budgetEntries, range){
   const host = document.getElementById('budget-list');
   if(!host) return;
   const expandedList = expandSplits(list);
+  const pace = range ? monthPaceInfo(range) : null;
   const rows = budgetEntries.map(([catName, limit])=>{
     const spent = expandedList.filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t)).reduce((s,t)=> s+Math.abs(t.amount), 0);
     const pct = limit>0 ? Math.min(999, Math.round(spent/limit*100)) : 0;
     const color = pct>=100 ? 'var(--expense)' : (pct>=80 ? 'var(--gold)' : 'var(--income)');
+    let paceHTML = '';
+    if(pace && pct<100){
+      const paceDiff = pct - pace.pacePct;
+      let paceLabel, paceColor;
+      if(paceDiff > 15){ paceLabel = `running ${Math.round(paceDiff)}pts ahead of pace`; paceColor = 'var(--expense)'; }
+      else if(paceDiff < -15){ paceLabel = 'well under pace'; paceColor = 'var(--income)'; }
+      else { paceLabel = 'on pace'; paceColor = 'var(--ink-faint)'; }
+      paceHTML = `<span style="color:${paceColor};"> · ${paceLabel}</span>`;
+    }
+    const paceMarker = pace ? `<div style="position:absolute;left:${Math.min(100,pace.pacePct)}%;top:0;bottom:0;width:2px;background:var(--ink);opacity:.45;" title="${Math.round(pace.pacePct)}% of the month has passed (day ${pace.elapsedDays} of ${pace.totalDays})"></div>` : '';
     return `<div class="budget-row">
       <div class="budget-row-top">
         <span class="budget-name">${escHTML(catName)}</span>
         <span class="budget-figures num">${gbp(spent)} <span style="color:var(--ink-faint);">/ ${gbp(limit)}</span></span>
       </div>
-      <div class="budget-bar-track"><div class="budget-bar-fill" style="width:${Math.min(100,pct)}%; background:${color};"></div></div>
-      <div class="budget-pct" style="color:${color};">${pct}% ${pct>=100?'over budget':'used'}</div>
+      <div class="budget-bar-track" style="position:relative;">
+        <div class="budget-bar-fill" style="width:${Math.min(100,pct)}%; background:${color};"></div>
+        ${paceMarker}
+      </div>
+      <div class="budget-pct" style="color:${color};">${pct}% ${pct>=100?'over budget':'used'}${paceHTML}</div>
     </div>`;
   }).join('');
-  host.innerHTML = `<div class="budget-grid">${rows}</div>`;
+  host.innerHTML = `<div class="budget-grid">${rows}</div>${pace ? `<p style="font-size:11px;color:var(--ink-faint);margin:10px 2px 0;">The dark marker on each bar shows where you'd be if spending were spread evenly across the month — you're ${Math.round(pace.pacePct)}% through it (day ${pace.elapsedDays} of ${pace.totalDays}).</p>` : ''}`;
 }
 function renderSavingsOpportunities(opps){
   const host = document.getElementById('savings-opps-list');
@@ -1884,14 +1957,19 @@ function layoutSankeyColumn(buckets, availH, gap, minNodeH){
   if(!total || !buckets.length) return [];
   const totalGap = gap*(buckets.length-1);
   const forNodes = Math.max(0, availH - totalGap);
-  let heights = buckets.map(b=> b.value/total*forNodes);
-  for(let pass=0; pass<buckets.length; pass++){
-    const flooredIdx = new Set(heights.map((h,i)=> h<minNodeH ? i : -1).filter(i=>i>=0));
-    if(!flooredIdx.size) break;
-    const flooredTotal = flooredIdx.size*minNodeH;
-    const remainingH = Math.max(0, forNodes - flooredTotal);
-    const remainingValue = buckets.reduce((s,b,i)=> flooredIdx.has(i) ? s : s+b.value, 0);
-    heights = buckets.map((b,i)=> flooredIdx.has(i) ? minNodeH : (remainingValue>0 ? b.value/remainingValue*remainingH : 0));
+  const heights = new Array(buckets.length).fill(0);
+  const floored = new Set();
+  for(let pass=0; pass<buckets.length+1; pass++){
+    const remainingValue = buckets.reduce((s,b,i)=> floored.has(i) ? s : s+b.value, 0);
+    const remainingH = Math.max(0, forNodes - floored.size*minNodeH);
+    let newlyFloored = false;
+    buckets.forEach((b,i)=>{
+      if(floored.has(i)){ heights[i] = minNodeH; return; }
+      const h = remainingValue>0 ? b.value/remainingValue*remainingH : 0;
+      if(h < minNodeH){ floored.add(i); heights[i] = minNodeH; newlyFloored = true; }
+      else heights[i] = h;
+    });
+    if(!newlyFloored) break;
   }
   let cursor = 0;
   return buckets.map((b,i)=>{
@@ -3082,6 +3160,253 @@ function drawInvestRateChart(){
       plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(item)=> ` ${item.parsed.y.toFixed(1)}% of income`}} },
       scales:{ y:{ ticks:{callback:(v)=>v+'%', font:{size:11}, color:chartTickColor()}, grid:{color:chartGridColor()} },
                 x:{ grid:{display:false}, ticks:{font:{size:10.5}, color:chartTickColor()} } }
+    }
+  });
+}
+
+/* =========================================================
+   INSIGHTS
+   ========================================================= */
+const DOW_LABELS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+function biggestTransactions(range, limit){
+  return DB.transactions
+    .filter(t=> countsTowardTotals(t) && t.date>=range.from && t.date<=range.to)
+    .sort((a,b)=> Math.abs(b.amount)-Math.abs(a.amount))
+    .slice(0, limit||10);
+}
+function spendByDayOfWeek(range){
+  const totals = [0,0,0,0,0,0,0], counts = [0,0,0,0,0,0,0];
+  DB.transactions.forEach(t=>{
+    if(!countsTowardTotals(t) || t.amount>=0) return;
+    if(t.date<range.from || t.date>range.to) return;
+    const dow = new Date(t.date+'T00:00:00').getDay();
+    totals[dow] += Math.abs(t.amount);
+    counts[dow]++;
+  });
+  return DOW_LABELS.map((label,i)=> ({label, total:totals[i], count:counts[i]}));
+}
+function savingsRateTrend(){
+  return trendBuckets('month').map(b=>{
+    const list = txInRange(b.from, b.to);
+    const income = sumIncome(list);
+    const expense = sumExpense(list);
+    const net = income - expense;
+    const rate = income>0 ? (net/income*100) : 0;
+    return Object.assign({}, b, {income, expense, net, rate});
+  });
+}
+function merchantSpendInRange(canonicalName, from, to){
+  return txInRange(from,to).reduce((s,t)=>{
+    if(t.amount>=0 || !countsTowardTotals(t)) return s;
+    const rawKey = merchantKeyFor(t.description);
+    const key = DB.merchantAliases[rawKey] || rawKey;
+    return key===canonicalName ? s+Math.abs(t.amount) : s;
+  }, 0);
+}
+function merchantSpendTrend(limit){
+  limit = limit || 6;
+  const now = todayISO();
+  const curFrom = addMonths(now.slice(0,8)+'01', -2).slice(0,7)+'-01';
+  const curTo = now;
+  const prevFrom = addMonths(curFrom, -3);
+  const prevTo = addDays(curFrom, -1);
+  const top = topMerchants(txInRange(prevFrom, curTo), limit);
+  return top.map(m=>{
+    const cur = merchantSpendInRange(m.name, curFrom, curTo);
+    const prev = merchantSpendInRange(m.name, prevFrom, prevTo);
+    const delta = cur-prev;
+    const pct = prev>0.005 ? (delta/prev*100) : (cur>0.005 ? 100 : 0);
+    return {name:m.name, cur, prev, delta, pct};
+  });
+}
+function yearOverYearSeries(){
+  const now = new Date();
+  const thisYearNum = now.getFullYear();
+  const lastYearNum = thisYearNum-1;
+  const months = [];
+  for(let m=0;m<12;m++){
+    const from1 = new Date(thisYearNum,m,1).toISOString().slice(0,10);
+    const to1 = new Date(thisYearNum,m+1,0).toISOString().slice(0,10);
+    const from0 = new Date(lastYearNum,m,1).toISOString().slice(0,10);
+    const to0 = new Date(lastYearNum,m+1,0).toISOString().slice(0,10);
+    months.push({
+      label: new Date(thisYearNum,m,1).toLocaleDateString('en-GB',{month:'short'}),
+      thisYear: sumExpense(txInRange(from1,to1)),
+      lastYear: sumExpense(txInRange(from0,to0)),
+    });
+  }
+  return {months, thisYearNum, lastYearNum};
+}
+function renderInsights(c){
+  const range = periodRange(UI.insightsPeriod);
+  const biggest = biggestTransactions(range, 10);
+  const dow = spendByDayOfWeek(range);
+  const dowMax = Math.max(1, ...dow.map(d=>d.total));
+  const dowTop = dow.reduce((best,d)=> d.total>best.total ? d : best, dow[0]);
+  const savingsRate = savingsRateTrend();
+  const merchants = merchantSpendTrend(6);
+  const yoy = yearOverYearSeries();
+  const creep = detectBillCreep();
+
+  c.innerHTML = `
+    <div class="panel-head" style="margin-bottom:14px;">
+      <div class="seg" id="insights-period-seg">
+        <button data-p="month" class="${UI.insightsPeriod==='month'?'active':''}">This month</button>
+        <button data-p="year" class="${UI.insightsPeriod==='year'?'active':''}">This year</button>
+        <button data-p="all" class="${UI.insightsPeriod==='all'?'active':''}">All time</button>
+      </div>
+      <div class="page-sub" style="margin:0;">${range.label}</div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Biggest transactions<small>${range.label} · top 10 by size</small></div></div>
+        <div id="insights-biggest"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Spending by day of week<small>${range.label}${dow.some(d=>d.total>0) ? ` · most goes out on ${dowTop.label}` : ''}</small></div></div>
+        <div class="chart-wrap"><canvas id="insights-dow-chart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px;">
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Savings rate trend<small>Last 12 months · (income − spending) ÷ income</small></div></div>
+        <div class="chart-wrap"><canvas id="insights-savings-rate-chart"></canvas></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Merchant spend trends<small>Last 3 months vs the 3 before that</small></div></div>
+        <div id="insights-merchant-trends"></div>
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px;">
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Year over year<small>${yoy.thisYearNum} vs ${yoy.lastYearNum} · spending by month</small></div></div>
+        <div style="position:relative;height:280px;"><canvas id="insights-yoy-chart"></canvas></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Subscription &amp; bill creep<small>Recurring payments that have quietly gone up</small></div></div>
+        <div id="insights-creep"></div>
+      </div>
+    </div>
+  `;
+
+  const host = document.getElementById('insights-biggest');
+  if(!biggest.length){
+    host.innerHTML = `<div class="empty-state" style="padding:24px 10px;"><h4>Nothing in this period</h4><p style="font-size:12.5px;">Transactions for ${escHTML(range.label)} will show up here.</p></div>`;
+  } else {
+    host.innerHTML = biggest.map(t=> `
+      <div class="movers-row">
+        <span class="movers-desc" style="white-space:normal;line-height:1.4;" title="${escAttr(t.description)}">${escHTML(t.description)}<br><span style="color:var(--ink-faint);font-size:10.5px;">${ukDate(t.date)}${t.category?` · ${escHTML(t.category)}`:''}${(t.splits&&t.splits.length)?` · Split (${t.splits.length})`:''}</span></span>
+        <span class="movers-amt num" style="color:${t.amount>0?'var(--income)':'var(--ink)'};">${gbp(t.amount,{signed:true})}</span>
+      </div>
+    `).join('');
+  }
+
+  const mHost = document.getElementById('insights-merchant-trends');
+  if(!merchants.length){
+    mHost.innerHTML = `<div class="empty-state" style="padding:24px 10px;"><h4>Not enough history yet</h4><p style="font-size:12.5px;">Once you've got a few months of transactions, merchant trends will show up here.</p></div>`;
+  } else {
+    mHost.innerHTML = merchants.map(m=>{
+      const flat = Math.abs(m.pct) < 1;
+      const up = m.pct >= 1;
+      const arrow = flat ? '→' : (up ? '↑' : '↓');
+      const color = flat ? 'var(--ink-faint)' : (up ? 'var(--expense)' : 'var(--income)');
+      return `
+      <div class="movers-row">
+        <span class="movers-desc" title="${escAttr(m.name)}">${escHTML(m.name)}<br><span style="color:var(--ink-faint);font-size:10.5px;">${gbp(m.prev)} → ${gbp(m.cur)}</span></span>
+        <span class="movers-amt num" style="color:${color};">${arrow} ${Math.abs(m.pct).toFixed(0)}%</span>
+      </div>`;
+    }).join('');
+  }
+
+  const creepHost = document.getElementById('insights-creep');
+  if(!creep.length){
+    creepHost.innerHTML = `<div class="empty-state" style="padding:24px 10px;"><h4>Nothing creeping up</h4><p style="font-size:12.5px;">Your recurring payments have stayed roughly the same amount each time.</p></div>`;
+  } else {
+    creepHost.innerHTML = creep.map(cr=> `
+      <div class="movers-row">
+        <span class="movers-desc" style="white-space:normal;line-height:1.4;" title="${escAttr(cr.description)}">${escHTML(cr.description)}${cr.category?` <span class="stamp-mini">${escHTML(cr.category)}</span>`:''}<br><span style="color:var(--ink-faint);font-size:10.5px;">${gbp(cr.firstAmt)} (${ukDateShort(cr.firstDate)}) → ${gbp(cr.lastAmt)} (${ukDateShort(cr.lastDate)})</span></span>
+        <span class="movers-amt num" style="color:var(--expense);">↑ ${cr.pct.toFixed(0)}%</span>
+      </div>
+    `).join('');
+  }
+
+  document.getElementById('insights-period-seg').addEventListener('click', e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    UI.insightsPeriod = b.dataset.p;
+    renderInsights(c);
+  });
+
+  drawDowChart(dow, dowMax);
+  drawSavingsRateChart(savingsRate);
+  drawYoyChart(yoy);
+}
+function drawSavingsRateChart(series){
+  const ctx = document.getElementById('insights-savings-rate-chart');
+  if(!ctx) return;
+  if(UI.charts.savingsRate) UI.charts.savingsRate.destroy();
+  UI.charts.savingsRate = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: series.map(s=>s.label),
+      datasets: [{ label:'Savings rate', data: series.map(s=>s.rate), tension:.3, fill:true, borderWidth:2.5, pointRadius:2,
+        borderColor:cssVar('--brand'), backgroundColor:hexToRgba(cssVar('--brand'),.1) }],
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(item)=> ` ${item.parsed.y.toFixed(1)}% of income saved`}} },
+      scales:{ y:{ ticks:{callback:(v)=>v+'%', font:{size:11}, color:chartTickColor()}, grid:{color:chartGridColor()} },
+                x:{ grid:{display:false}, ticks:{font:{size:10.5}, color:chartTickColor()} } }
+    }
+  });
+}
+function drawYoyChart(yoy){
+  const ctx = document.getElementById('insights-yoy-chart');
+  if(!ctx) return;
+  if(UI.charts.yoy) UI.charts.yoy.destroy();
+  UI.charts.yoy = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: yoy.months.map(m=>m.label),
+      datasets: [
+        { label:String(yoy.lastYearNum), data: yoy.months.map(m=>m.lastYear), backgroundColor:cssVar('--ink-faint'), borderRadius:3 },
+        { label:String(yoy.thisYearNum), data: yoy.months.map(m=>m.thisYear), backgroundColor:cssVar('--brand'), borderRadius:3 },
+      ],
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{position:'bottom', labels:{boxWidth:10, usePointStyle:true, font:{family:"'Inter',sans-serif", size:11.5}, color:chartTickColor()}},
+        tooltip:{callbacks:{label:(item)=> ` ${item.dataset.label}: ${gbp(item.parsed.y)}`}} },
+      scales:{ y:{ ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}, color:chartTickColor()}, grid:{color:chartGridColor()} },
+                x:{ grid:{display:false}, ticks:{font:{size:11}, color:chartTickColor()} } }
+    }
+  });
+}
+function drawDowChart(dow, dowMax){
+  const ctx = document.getElementById('insights-dow-chart');
+  if(!ctx) return;
+  if(UI.charts.dow) UI.charts.dow.destroy();
+  if(!dow.some(d=>d.total>0)){
+    ctx.parentElement.innerHTML = `<div class="empty-state" style="padding:30px 10px;"><h4>No spending yet</h4><p style="font-size:12.5px;">Once you have expenses logged for this period, the pattern by weekday will show up here.</p></div>`;
+    return;
+  }
+  UI.charts.dow = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: dow.map(d=>d.label),
+      datasets: [{ label:'Spent', data: dow.map(d=>d.total),
+        backgroundColor: dow.map(d=> d.total===dowMax ? cssVar('--expense') : cssVar('--brand')), borderRadius:3 }],
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(item)=>{
+        const d = dow[item.dataIndex];
+        return ` ${gbp(d.total)} across ${d.count} transaction${d.count===1?'':'s'}`;
+      }}} },
+      scales:{ y:{ ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}, color:chartTickColor()}, grid:{color:chartGridColor()} },
+                x:{ grid:{display:false}, ticks:{font:{size:11}, color:chartTickColor()} } }
     }
   });
 }
