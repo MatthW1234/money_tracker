@@ -717,6 +717,7 @@ function buildSeedDB(){
     accounts: ['Current Account', 'Savings', 'Credit Card'],
     discretionaryCategories: ['Dining Out', 'Entertainment', 'Shopping', 'Subscriptions', 'Travel'],
     investmentCategories: ['Savings/Investment'],
+    pendingCharges: [],
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -736,6 +737,7 @@ function buildEmptyDB(){
     accounts: [],
     discretionaryCategories: [],
     investmentCategories: [],
+    pendingCharges: [],
   };
 }
 
@@ -1555,7 +1557,7 @@ function renderDashboard(c){
 
     ${showBudgets ? `
     <div class="panel" style="margin-top:16px;">
-      <div class="panel-head"><div class="panel-title">Budgets<small>${range.label}</small></div></div>
+      <div class="panel-head"><div class="panel-title">Budgets<small>${range.label}</small></div><button class="btn btn-sm" id="btn-pending-charge">+ Pending charge</button></div>
       <div id="budget-list"></div>
     </div>` : ''}
 
@@ -1623,6 +1625,8 @@ function renderDashboard(c){
     renderDashboard(c);
   });
   document.getElementById('view-all-tx').onclick = ()=> { document.querySelector('[data-tab="transactions"]').click(); };
+  const pendingBtn = document.getElementById('btn-pending-charge');
+  if(pendingBtn) pendingBtn.onclick = ()=> openPendingChargeModal(range);
 
   const recentBody = document.getElementById('recent-body');
   const recent = [...list].sort((a,b)=> b.date.localeCompare(a.date) || 0).slice(0,8);
@@ -1738,6 +1742,21 @@ function monthPaceInfo(range){
   else elapsedDays = Math.round((today-from)/86400000)+1;
   return { totalDays, elapsedDays, pacePct: totalDays>0 ? (elapsedDays/totalDays*100) : 0 };
 }
+// Pending charges are money you know you've committed to spending — typically
+// on a credit card tracked in a different app — but that hasn't shown up as
+// an actual transaction here yet. They live in their own list, never in
+// DB.transactions, specifically so nothing that touches balance, income,
+// expense totals, investments, or any chart can ever see them: only the
+// budget bars (which explicitly opt in) do. When the real statement/payment
+// eventually gets imported, delete the matching pending entries so they
+// don't get double-counted alongside the real transaction.
+function pendingChargesInRange(range){
+  if(!range) return [];
+  return DB.pendingCharges.filter(p=> p.date>=range.from && p.date<=range.to);
+}
+function pendingForCategory(catName, range){
+  return pendingChargesInRange(range).filter(p=>p.category===catName).reduce((s,p)=>s+p.amount, 0);
+}
 function renderBudgets(list, budgetEntries, range){
   const host = document.getElementById('budget-list');
   if(!host) return;
@@ -1745,7 +1764,11 @@ function renderBudgets(list, budgetEntries, range){
   const pace = range ? monthPaceInfo(range) : null;
   const rows = budgetEntries.map(([catName, limit])=>{
     const spent = expandedList.filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t)).reduce((s,t)=> s+Math.abs(t.amount), 0);
-    const pct = limit>0 ? Math.min(999, Math.round(spent/limit*100)) : 0;
+    const pending = range ? pendingForCategory(catName, range) : 0;
+    const combined = spent + pending;
+    const pct = limit>0 ? Math.min(999, Math.round(combined/limit*100)) : 0;
+    const spentPct = limit>0 ? Math.min(100, spent/limit*100) : 0;
+    const pendingPct = limit>0 ? Math.max(0, Math.min(100-spentPct, pending/limit*100)) : 0;
     const color = pct>=100 ? 'var(--expense)' : (pct>=80 ? 'var(--gold)' : 'var(--income)');
     let paceHTML = '';
     if(pace && pct<100){
@@ -1757,19 +1780,83 @@ function renderBudgets(list, budgetEntries, range){
       paceHTML = `<span style="color:${paceColor};"> · ${paceLabel}</span>`;
     }
     const paceMarker = pace ? `<div style="position:absolute;left:${Math.min(100,pace.pacePct)}%;top:0;bottom:0;width:2px;background:var(--ink);opacity:.45;" title="${Math.round(pace.pacePct)}% of the month has passed (day ${pace.elapsedDays} of ${pace.totalDays})"></div>` : '';
+    const pendingSegment = pendingPct>0.5 ? `<div style="position:absolute;left:${spentPct}%;top:0;bottom:0;width:${pendingPct}%;background:repeating-linear-gradient(45deg, ${color}, ${color} 3px, transparent 3px, transparent 6px);opacity:.65;" title="${gbp(pending)} pending — not counted in your balance yet"></div>` : '';
     return `<div class="budget-row">
       <div class="budget-row-top">
         <span class="budget-name">${escHTML(catName)}</span>
-        <span class="budget-figures num">${gbp(spent)} <span style="color:var(--ink-faint);">/ ${gbp(limit)}</span></span>
+        <span class="budget-figures num">${gbp(spent)}${pending>0.005?` <span style="color:var(--ink-faint);">+ ${gbp(pending)} pending</span>`:''} <span style="color:var(--ink-faint);">/ ${gbp(limit)}</span></span>
       </div>
       <div class="budget-bar-track" style="position:relative;">
-        <div class="budget-bar-fill" style="width:${Math.min(100,pct)}%; background:${color};"></div>
+        <div class="budget-bar-fill" style="width:${spentPct}%; background:${color};"></div>
+        ${pendingSegment}
         ${paceMarker}
       </div>
       <div class="budget-pct" style="color:${color};">${pct}% ${pct>=100?'over budget':'used'}${paceHTML}</div>
     </div>`;
   }).join('');
-  host.innerHTML = `<div class="budget-grid">${rows}</div>${pace ? `<p style="font-size:11px;color:var(--ink-faint);margin:10px 2px 0;">The dark marker on each bar shows where you'd be if spending were spread evenly across the month — you're ${Math.round(pace.pacePct)}% through it (day ${pace.elapsedDays} of ${pace.totalDays}).</p>` : ''}`;
+  host.innerHTML = `<div class="budget-grid">${rows}</div>${pace ? `<p style="font-size:11px;color:var(--ink-faint);margin:10px 2px 0;">The dark marker on each bar shows where you'd be if spending were spread evenly across the month — you're ${Math.round(pace.pacePct)}% through it (day ${pace.elapsedDays} of ${pace.totalDays}). Striped segments are pending charges not yet in your balance.</p>` : ''}`;
+}
+function openPendingChargeModal(range){
+  function render(){
+    const catOpts = DB.categories.filter(c=>c.kind==='expense').map(c=>`<option value="${escAttr(c.name)}">${escHTML(c.name)}</option>`).join('');
+    openModal(`
+      <div class="modal-head"><h3>Pending charges</h3></div>
+      <div class="modal-body">
+        <p style="font-size:12.5px;color:var(--ink-soft);margin:0 0 14px;">Log spend you know is coming — like a credit card purchase tracked in a different app — before it shows up as an actual transaction here. This adds to your budget usage right away, but never touches your balance or income/spending totals. Once the real transaction (or the card payment) comes through, delete the matching entry below so it isn't counted twice.</p>
+        <div class="form-grid">
+          <div class="field"><label>Date</label><input type="date" id="pc-date" value="${todayISO()}"></div>
+          <div class="field"><label>Amount (£)</label><input type="number" id="pc-amount" min="0" step="0.01" placeholder="0.00"></div>
+          <div class="field span2"><label>Category</label><select id="pc-cat">${catOpts}</select></div>
+          <div class="field span2"><label>Note (optional)</label><input type="text" id="pc-desc" placeholder="e.g. Amazon order"></div>
+        </div>
+        <button class="btn btn-primary btn-sm" id="pc-add" style="margin-top:6px;">Add pending charge</button>
+        <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:12px;">
+          <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Current pending charges</div>
+          <div id="pc-list"></div>
+        </div>
+      </div>
+      <div class="modal-foot"><button class="btn" id="m-cancel">Close</button></div>
+    `, {wide:true});
+    document.getElementById('m-cancel').onclick = closeModal;
+    document.getElementById('pc-add').onclick = ()=>{
+      const date = document.getElementById('pc-date').value;
+      const amount = parseFloat(document.getElementById('pc-amount').value);
+      const category = document.getElementById('pc-cat').value;
+      const description = document.getElementById('pc-desc').value.trim();
+      if(!date){ toast('Pick a date', 'error'); return; }
+      if(!(amount>0)){ toast('Enter an amount', 'error'); return; }
+      DB.pendingCharges.push({id:uid('pend'), date, amount, category, description});
+      scheduleSave();
+      renderList();
+      renderContent();
+      toast('Pending charge added');
+    };
+    renderList();
+  }
+  function renderList(){
+    const host = document.getElementById('pc-list');
+    if(!host) return;
+    const items = [...DB.pendingCharges].sort((a,b)=> b.date.localeCompare(a.date));
+    if(!items.length){
+      host.innerHTML = `<p style="font-size:12px;color:var(--ink-faint);">None yet.</p>`;
+      return;
+    }
+    host.innerHTML = items.map(p=> `
+      <div class="movers-row">
+        <span class="movers-desc">${escHTML(p.category)}${p.description?` — ${escHTML(p.description)}`:''}<br><span style="color:var(--ink-faint);font-size:10.5px;">${ukDate(p.date)}</span></span>
+        <span class="movers-amt num">${gbp(p.amount)}</span>
+        <button class="row-icon-btn" data-id="${p.id}" data-action="del-pending" title="Remove">${iconTrash()}</button>
+      </div>
+    `).join('');
+    host.querySelectorAll('[data-action="del-pending"]').forEach(b=> b.onclick = ()=>{
+      DB.pendingCharges = DB.pendingCharges.filter(p=>p.id!==b.dataset.id);
+      scheduleSave();
+      renderList();
+      renderContent();
+      toast('Pending charge removed');
+    });
+  }
+  render();
 }
 function renderSavingsOpportunities(opps){
   const host = document.getElementById('savings-opps-list');
@@ -3186,13 +3273,27 @@ function spendByDayOfWeek(range){
   return DOW_LABELS.map((label,i)=> ({label, total:totals[i], count:counts[i]}));
 }
 function savingsRateTrend(){
-  return trendBuckets('month').map(b=>{
+  const buckets = trendBuckets('month').map(b=>{
     const list = txInRange(b.from, b.to);
     const income = sumIncome(list);
     const expense = sumExpense(list);
     const net = income - expense;
-    const rate = income>0 ? (net/income*100) : 0;
-    return Object.assign({}, b, {income, expense, net, rate});
+    return Object.assign({}, b, {income, expense, net});
+  });
+  // A rate of (income − expense) ÷ income blows up whenever income is small
+  // relative to a normal month — £20 income and £62 spend is a mundane
+  // situation, but "−210% saved" reads as broken. Flag months where income
+  // is well below this window's typical month (median of the months that
+  // had any income at all) and clip what gets plotted, while keeping the
+  // real number available for the tooltip.
+  const incomes = buckets.map(b=>b.income).filter(v=>v>0).sort((a,b)=>a-b);
+  const median = incomes.length ? incomes[Math.floor(incomes.length/2)] : 0;
+  return buckets.map(b=>{
+    const rawRate = b.income>0 ? (b.net/b.income*100) : 0;
+    const lowIncome = median>0 && b.income>0 && b.income < median*0.25;
+    const noIncome = b.income<=0;
+    const displayRate = Math.max(-100, Math.min(150, rawRate));
+    return Object.assign({}, b, {rawRate, displayRate, lowIncome, noIncome});
   });
 }
 function merchantSpendInRange(canonicalName, from, to){
@@ -3273,6 +3374,7 @@ function renderInsights(c){
       <div class="panel">
         <div class="panel-head"><div class="panel-title">Savings rate trend<small>Last 12 months · (income − spending) ÷ income</small></div></div>
         <div class="chart-wrap"><canvas id="insights-savings-rate-chart"></canvas></div>
+        ${savingsRate.some(s=>s.lowIncome||s.noIncome) ? `<p style="font-size:11px;color:var(--ink-faint);margin:8px 2px 0;">Hollow points mark months with unusually low or no recorded income — the % swings wildly when there's barely any income to divide by, so treat those figures as noise rather than a real trend.</p>` : ''}
       </div>
       <div class="panel">
         <div class="panel-head"><div class="panel-title">Merchant spend trends<small>Last 3 months vs the 3 before that</small></div></div>
@@ -3347,16 +3449,28 @@ function drawSavingsRateChart(series){
   const ctx = document.getElementById('insights-savings-rate-chart');
   if(!ctx) return;
   if(UI.charts.savingsRate) UI.charts.savingsRate.destroy();
+  const flagged = s => s.lowIncome || s.noIncome;
   UI.charts.savingsRate = new Chart(ctx, {
     type: 'line',
     data: {
       labels: series.map(s=>s.label),
-      datasets: [{ label:'Savings rate', data: series.map(s=>s.rate), tension:.3, fill:true, borderWidth:2.5, pointRadius:2,
+      datasets: [{ label:'Savings rate', data: series.map(s=>s.displayRate), tension:.3, fill:true, borderWidth:2.5,
+        pointRadius: series.map(s=> flagged(s) ? 4 : 2),
+        pointBackgroundColor: series.map(s=> flagged(s) ? cssVar('--surface') : cssVar('--brand')),
+        pointBorderColor: series.map(s=> flagged(s) ? cssVar('--gold') : cssVar('--brand')),
+        pointBorderWidth: series.map(s=> flagged(s) ? 2 : 1),
         borderColor:cssVar('--brand'), backgroundColor:hexToRgba(cssVar('--brand'),.1) }],
     },
     options:{
       responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(item)=> ` ${item.parsed.y.toFixed(1)}% of income saved`}} },
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{
+        label:(item)=>{
+          const s = series[item.dataIndex];
+          if(s.noIncome) return ' No income recorded this month';
+          if(s.lowIncome) return [` ${s.rawRate.toFixed(0)}% (income was unusually low: ${gbp(s.income)})`, ' % swings a lot when income is this small — not very meaningful'];
+          return ` ${s.rawRate.toFixed(1)}% of income saved`;
+        },
+      } } },
       scales:{ y:{ ticks:{callback:(v)=>v+'%', font:{size:11}, color:chartTickColor()}, grid:{color:chartGridColor()} },
                 x:{ grid:{display:false}, ticks:{font:{size:10.5}, color:chartTickColor()} } }
     }
@@ -3919,6 +4033,7 @@ function deleteCategory(name){
     DB.regularCategories = DB.regularCategories.filter(n=>n!==name);
     DB.discretionaryCategories = DB.discretionaryCategories.filter(n=>n!==name);
     DB.investmentCategories = DB.investmentCategories.filter(n=>n!==name);
+    DB.pendingCharges = DB.pendingCharges.filter(p=>p.category!==name);
     delete DB.budgets[name];
     scheduleSave(); closeModal(); renderContent(); toast('Category deleted');
   };
@@ -4722,6 +4837,7 @@ function handleRestoreFile(file){
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
       discretionaryCategories: Array.isArray(parsed.discretionaryCategories) ? parsed.discretionaryCategories : [],
       investmentCategories: Array.isArray(parsed.investmentCategories) ? parsed.investmentCategories : [],
+      pendingCharges: Array.isArray(parsed.pendingCharges) ? parsed.pendingCharges : [],
       lastImport: (parsed.lastImport && typeof parsed.lastImport==='object') ? parsed.lastImport : null,
     };
     const currentCount = DB.transactions.length;
@@ -4800,6 +4916,7 @@ async function init(){
   if(!DB.accounts) DB.accounts = [];
   if(!DB.discretionaryCategories) DB.discretionaryCategories = [];
   if(!DB.investmentCategories) DB.investmentCategories = [];
+  if(!DB.pendingCharges) DB.pendingCharges = [];
   if(DB.lastImport === undefined) DB.lastImport = null;
   if(!loaded) scheduleSave();
 
