@@ -717,7 +717,7 @@ function buildSeedDB(){
     accounts: ['Current Account', 'Savings', 'Credit Card'],
     discretionaryCategories: ['Dining Out', 'Entertainment', 'Shopping', 'Subscriptions', 'Travel'],
     investmentCategories: ['Savings/Investment'],
-    pendingCharges: [],
+    pendingCards: [],
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -737,7 +737,7 @@ function buildEmptyDB(){
     accounts: [],
     discretionaryCategories: [],
     investmentCategories: [],
-    pendingCharges: [],
+    pendingCards: [],
   };
 }
 
@@ -1557,7 +1557,7 @@ function renderDashboard(c){
 
     ${showBudgets ? `
     <div class="panel" style="margin-top:16px;">
-      <div class="panel-head"><div class="panel-title">Budgets<small>${range.label}</small></div><button class="btn btn-sm" id="btn-pending-charge">+ Pending charge</button></div>
+      <div class="panel-head"><div class="panel-title">Budgets<small>${range.label}</small></div><button class="btn btn-sm" id="btn-pending-charge">Credit cards</button></div>
       <div id="budget-list"></div>
     </div>` : ''}
 
@@ -1626,7 +1626,7 @@ function renderDashboard(c){
   });
   document.getElementById('view-all-tx').onclick = ()=> { document.querySelector('[data-tab="transactions"]').click(); };
   const pendingBtn = document.getElementById('btn-pending-charge');
-  if(pendingBtn) pendingBtn.onclick = ()=> openPendingChargeModal(range);
+  if(pendingBtn) pendingBtn.onclick = ()=> openPendingCardsModal();
 
   const recentBody = document.getElementById('recent-body');
   const recent = [...list].sort((a,b)=> b.date.localeCompare(a.date) || 0).slice(0,8);
@@ -1742,29 +1742,31 @@ function monthPaceInfo(range){
   else elapsedDays = Math.round((today-from)/86400000)+1;
   return { totalDays, elapsedDays, pacePct: totalDays>0 ? (elapsedDays/totalDays*100) : 0 };
 }
-// Pending charges are money you know you've committed to spending — typically
-// on a credit card tracked in a different app — but that hasn't shown up as
-// an actual transaction here yet. They live in their own list, never in
-// DB.transactions, specifically so nothing that touches balance, income,
-// expense totals, investments, or any chart can ever see them: only the
-// budget bars (which explicitly opt in) do. When the real statement/payment
-// eventually gets imported, delete the matching pending entries so they
-// don't get double-counted alongside the real transaction.
-function pendingChargesInRange(range){
-  if(!range) return [];
-  return DB.pendingCharges.filter(p=> p.date>=range.from && p.date<=range.to);
-}
-function pendingForCategory(catName, range){
-  return pendingChargesInRange(range).filter(p=>p.category===catName).reduce((s,p)=>s+p.amount, 0);
+// A "pending card" is a running total, not a log of individual purchases —
+// you check your credit card app and enter the current total it shows,
+// which replaces whatever was there before (it does NOT add up entry by
+// entry). That matches how a card's own app already presents it, and means
+// updating is a single quick number entry rather than itemising every
+// purchase. Cards live in their own list, never in DB.transactions, so
+// nothing that touches balance, income, expense totals, investments, or any
+// chart can ever see them — only the budget bars (which explicitly opt in)
+// do. They only apply to the month you're actually in right now, not one
+// you've navigated back to, since a "current total" only means something
+// for a cycle that's still open. Once the real card payment is imported,
+// set the card back to £0 (or delete it) so the next cycle starts clean.
+function pendingForCategory(catName, isLiveMonth){
+  if(!isLiveMonth) return 0;
+  return DB.pendingCards.filter(c=>c.category===catName).reduce((s,c)=>s+c.amount, 0);
 }
 function renderBudgets(list, budgetEntries, range){
   const host = document.getElementById('budget-list');
   if(!host) return;
   const expandedList = expandSplits(list);
   const pace = range ? monthPaceInfo(range) : null;
+  const isLiveMonth = UI.dashboardMonthOffset===0;
   const rows = budgetEntries.map(([catName, limit])=>{
     const spent = expandedList.filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t)).reduce((s,t)=> s+Math.abs(t.amount), 0);
-    const pending = range ? pendingForCategory(catName, range) : 0;
+    const pending = pendingForCategory(catName, isLiveMonth);
     const combined = spent + pending;
     const pct = limit>0 ? Math.min(999, Math.round(combined/limit*100)) : 0;
     const spentPct = limit>0 ? Math.min(100, spent/limit*100) : 0;
@@ -1780,11 +1782,11 @@ function renderBudgets(list, budgetEntries, range){
       paceHTML = `<span style="color:${paceColor};"> · ${paceLabel}</span>`;
     }
     const paceMarker = pace ? `<div style="position:absolute;left:${Math.min(100,pace.pacePct)}%;top:0;bottom:0;width:2px;background:var(--ink);opacity:.45;" title="${Math.round(pace.pacePct)}% of the month has passed (day ${pace.elapsedDays} of ${pace.totalDays})"></div>` : '';
-    const pendingSegment = pendingPct>0.5 ? `<div style="position:absolute;left:${spentPct}%;top:0;bottom:0;width:${pendingPct}%;background:repeating-linear-gradient(45deg, ${color}, ${color} 3px, transparent 3px, transparent 6px);opacity:.65;" title="${gbp(pending)} pending — not counted in your balance yet"></div>` : '';
+    const pendingSegment = pendingPct>0.5 ? `<div style="position:absolute;left:${spentPct}%;top:0;bottom:0;width:${pendingPct}%;background:repeating-linear-gradient(45deg, ${color}, ${color} 3px, transparent 3px, transparent 6px);opacity:.65;" title="${gbp(pending)} pending on card — not counted in your balance yet"></div>` : '';
     return `<div class="budget-row">
       <div class="budget-row-top">
         <span class="budget-name">${escHTML(catName)}</span>
-        <span class="budget-figures num">${gbp(spent)}${pending>0.005?` <span style="color:var(--ink-faint);">+ ${gbp(pending)} pending</span>`:''} <span style="color:var(--ink-faint);">/ ${gbp(limit)}</span></span>
+        <span class="budget-figures num">${gbp(spent)}${pending>0.005?` <span style="color:var(--ink-faint);">+ ${gbp(pending)} on card</span>`:''} <span style="color:var(--ink-faint);">/ ${gbp(limit)}</span></span>
       </div>
       <div class="budget-bar-track" style="position:relative;">
         <div class="budget-bar-fill" style="width:${spentPct}%; background:${color};"></div>
@@ -1794,66 +1796,88 @@ function renderBudgets(list, budgetEntries, range){
       <div class="budget-pct" style="color:${color};">${pct}% ${pct>=100?'over budget':'used'}${paceHTML}</div>
     </div>`;
   }).join('');
-  host.innerHTML = `<div class="budget-grid">${rows}</div>${pace ? `<p style="font-size:11px;color:var(--ink-faint);margin:10px 2px 0;">The dark marker on each bar shows where you'd be if spending were spread evenly across the month — you're ${Math.round(pace.pacePct)}% through it (day ${pace.elapsedDays} of ${pace.totalDays}). Striped segments are pending charges not yet in your balance.</p>` : ''}`;
+  host.innerHTML = `<div class="budget-grid">${rows}</div>${pace ? `<p style="font-size:11px;color:var(--ink-faint);margin:10px 2px 0;">The dark marker on each bar shows where you'd be if spending were spread evenly across the month — you're ${Math.round(pace.pacePct)}% through it (day ${pace.elapsedDays} of ${pace.totalDays}). Striped segments are your cards' current pending totals, not yet in your balance.</p>` : ''}`;
 }
-function openPendingChargeModal(range){
+function openPendingCardsModal(){
   function render(){
     const catOpts = DB.categories.filter(c=>c.kind==='expense').map(c=>`<option value="${escAttr(c.name)}">${escHTML(c.name)}</option>`).join('');
     openModal(`
-      <div class="modal-head"><h3>Pending charges</h3></div>
+      <div class="modal-head"><h3>Credit cards</h3></div>
       <div class="modal-body">
-        <p style="font-size:12.5px;color:var(--ink-soft);margin:0 0 14px;">Log spend you know is coming — like a credit card purchase tracked in a different app — before it shows up as an actual transaction here. This adds to your budget usage right away, but never touches your balance or income/spending totals. Once the real transaction (or the card payment) comes through, delete the matching entry below so it isn't counted twice.</p>
-        <div class="form-grid">
-          <div class="field"><label>Date</label><input type="date" id="pc-date" value="${todayISO()}"></div>
-          <div class="field"><label>Amount (£)</label><input type="number" id="pc-amount" min="0" step="0.01" placeholder="0.00"></div>
-          <div class="field span2"><label>Category</label><select id="pc-cat">${catOpts}</select></div>
-          <div class="field span2"><label>Note (optional)</label><input type="text" id="pc-desc" placeholder="e.g. Amazon order"></div>
-        </div>
-        <button class="btn btn-primary btn-sm" id="pc-add" style="margin-top:6px;">Add pending charge</button>
-        <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:12px;">
-          <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Current pending charges</div>
-          <div id="pc-list"></div>
+        <p style="font-size:12.5px;color:var(--ink-soft);margin:0 0 14px;">For a card tracked in a different app. Enter the current total it shows you've spent this cycle — each update <strong>replaces</strong> the previous figure, it doesn't add to it. This counts toward the matching budget right away, but never touches your balance or income/spending totals. Once the real card payment is imported here, set the card back to £0 (or delete it) to start the next cycle clean.</p>
+        <div id="pc-list" style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;"></div>
+        <div style="border-top:1px solid var(--line);padding-top:14px;">
+          <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Add a card</div>
+          <div class="form-grid">
+            <div class="field span2"><label>Card name</label><input type="text" id="pc-name" placeholder="e.g. Amex Gold"></div>
+            <div class="field"><label>Category</label><select id="pc-cat">${catOpts}</select></div>
+            <div class="field"><label>Current total (£)</label><input type="number" id="pc-amount" min="0" step="0.01" placeholder="0.00"></div>
+          </div>
+          <button class="btn btn-primary btn-sm" id="pc-add" style="margin-top:6px;">Add card</button>
         </div>
       </div>
       <div class="modal-foot"><button class="btn" id="m-cancel">Close</button></div>
     `, {wide:true});
     document.getElementById('m-cancel').onclick = closeModal;
     document.getElementById('pc-add').onclick = ()=>{
-      const date = document.getElementById('pc-date').value;
-      const amount = parseFloat(document.getElementById('pc-amount').value);
+      const name = document.getElementById('pc-name').value.trim();
+      const amount = parseFloat(document.getElementById('pc-amount').value) || 0;
       const category = document.getElementById('pc-cat').value;
-      const description = document.getElementById('pc-desc').value.trim();
-      if(!date){ toast('Pick a date', 'error'); return; }
-      if(!(amount>0)){ toast('Enter an amount', 'error'); return; }
-      DB.pendingCharges.push({id:uid('pend'), date, amount, category, description});
+      if(!name){ toast('Give the card a name', 'error'); return; }
+      DB.pendingCards.push({id:uid('card'), name, category, amount, updatedAt:new Date().toISOString()});
       scheduleSave();
+      document.getElementById('pc-name').value = '';
+      document.getElementById('pc-amount').value = '';
       renderList();
       renderContent();
-      toast('Pending charge added');
+      toast(`${name} added`);
     };
     renderList();
   }
   function renderList(){
     const host = document.getElementById('pc-list');
     if(!host) return;
-    const items = [...DB.pendingCharges].sort((a,b)=> b.date.localeCompare(a.date));
-    if(!items.length){
-      host.innerHTML = `<p style="font-size:12px;color:var(--ink-faint);">None yet.</p>`;
+    if(!DB.pendingCards.length){
+      host.innerHTML = `<p style="font-size:12px;color:var(--ink-faint);">No cards yet — add one below.</p>`;
       return;
     }
-    host.innerHTML = items.map(p=> `
-      <div class="movers-row">
-        <span class="movers-desc">${escHTML(p.category)}${p.description?` — ${escHTML(p.description)}`:''}<br><span style="color:var(--ink-faint);font-size:10.5px;">${ukDate(p.date)}</span></span>
-        <span class="movers-amt num">${gbp(p.amount)}</span>
-        <button class="row-icon-btn" data-id="${p.id}" data-action="del-pending" title="Remove">${iconTrash()}</button>
+    host.innerHTML = DB.pendingCards.map(cd=> `
+      <div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+          <div>
+            <strong style="font-size:13px;">${escHTML(cd.name)}</strong>
+            <span class="stamp-mini" style="margin-left:6px;">${escHTML(cd.category)}</span>
+          </div>
+          <button class="row-icon-btn" data-id="${cd.id}" data-action="del-card" title="Remove card">${iconTrash()}</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="num" style="font-size:15px;font-weight:600;min-width:80px;">${gbp(cd.amount)}</span>
+          <span style="font-size:11px;color:var(--ink-faint);flex:1;">updated ${timeAgoLabel(cd.updatedAt)}</span>
+          <input type="number" min="0" step="0.01" placeholder="new total" data-id="${cd.id}" class="pc-update-input" style="width:100px;">
+          <button class="btn btn-sm" data-id="${cd.id}" data-action="update-card">Update</button>
+        </div>
       </div>
     `).join('');
-    host.querySelectorAll('[data-action="del-pending"]').forEach(b=> b.onclick = ()=>{
-      DB.pendingCharges = DB.pendingCharges.filter(p=>p.id!==b.dataset.id);
+    host.querySelectorAll('[data-action="del-card"]').forEach(b=> b.onclick = ()=>{
+      const cd = DB.pendingCards.find(c=>c.id===b.dataset.id);
+      DB.pendingCards = DB.pendingCards.filter(c=>c.id!==b.dataset.id);
       scheduleSave();
       renderList();
       renderContent();
-      toast('Pending charge removed');
+      toast(cd ? `${cd.name} removed` : 'Card removed');
+    });
+    host.querySelectorAll('[data-action="update-card"]').forEach(b=> b.onclick = ()=>{
+      const input = host.querySelector(`.pc-update-input[data-id="${b.dataset.id}"]`);
+      const val = parseFloat(input.value);
+      if(isNaN(val) || val<0){ toast('Enter a valid amount', 'error'); return; }
+      const cd = DB.pendingCards.find(c=>c.id===b.dataset.id);
+      if(!cd) return;
+      cd.amount = val;
+      cd.updatedAt = new Date().toISOString();
+      scheduleSave();
+      renderList();
+      renderContent();
+      toast(`${cd.name} updated to ${gbp(val)}`);
     });
   }
   render();
@@ -3261,6 +3285,43 @@ function biggestTransactions(range, limit){
     .sort((a,b)=> Math.abs(b.amount)-Math.abs(a.amount))
     .slice(0, limit||10);
 }
+// A trailing N-day rolling sum, one point per day over the lookback window —
+// different from spendByDayOfWeek (which buckets by weekday across a whole
+// period) or the monthly trend charts (which reset at calendar boundaries).
+// This tracks short-term trajectory: is spending over the last week/month
+// accelerating or decelerating right now, regardless of where in the
+// calendar month you happen to be.
+function rollingSpendSeries(windowDays, lookbackDays){
+  const series = [];
+  for(let i=lookbackDays-1; i>=0; i--){
+    const endDate = addDays(todayISO(), -i);
+    const startDate = addDays(endDate, -(windowDays-1));
+    const sum = sumExpense(txInRange(startDate, endDate));
+    series.push({date: endDate, sum});
+  }
+  return series;
+}
+function spendMomentum(){
+  const lookback = 90;
+  const series7 = rollingSpendSeries(7, lookback);
+  const series30 = rollingSpendSeries(30, lookback);
+  function summarise(series, windowDays){
+    const current = series[series.length-1].sum;
+    // The non-overlapping window immediately before the current one.
+    const prevIdx = series.length-1-windowDays;
+    const previous = prevIdx>=0 ? series[prevIdx].sum : null;
+    const pctChange = (previous!=null && previous>0.005) ? ((current-previous)/previous*100) : null;
+    const maxInLookback = Math.max(...series.map(s=>s.sum));
+    const isHighest = current>0.005 && Math.abs(current-maxInLookback)<0.005;
+    return { current, previous, pctChange, isHighest };
+  }
+  return {
+    series7, series30,
+    win7: summarise(series7, 7),
+    win30: summarise(series30, 30),
+    lookback,
+  };
+}
 function spendByDayOfWeek(range){
   const totals = [0,0,0,0,0,0,0], counts = [0,0,0,0,0,0,0];
   DB.transactions.forEach(t=>{
@@ -3348,6 +3409,7 @@ function renderInsights(c){
   const merchants = merchantSpendTrend(6);
   const yoy = yearOverYearSeries();
   const creep = detectBillCreep();
+  const momentum = spendMomentum();
 
   c.innerHTML = `
     <div class="panel-head" style="margin-bottom:14px;">
@@ -3392,6 +3454,12 @@ function renderInsights(c){
         <div id="insights-creep"></div>
       </div>
     </div>
+
+    <div class="panel" style="margin-top:16px;">
+      <div class="panel-head"><div class="panel-title">Spending momentum<small>Rolling totals, day by day — not tied to calendar months</small></div></div>
+      <div id="insights-momentum-stats" class="kpi-row" style="margin-bottom:16px;"></div>
+      <div style="position:relative;height:240px;"><canvas id="insights-momentum-chart"></canvas></div>
+    </div>
   `;
 
   const host = document.getElementById('insights-biggest');
@@ -3435,6 +3503,20 @@ function renderInsights(c){
     `).join('');
   }
 
+  function momentumCardHTML(win, label){
+    let subline;
+    if(win.isHighest){
+      subline = `<span style="color:var(--expense);font-weight:600;">Highest ${label==='Last 7 days'?'7-day':'30-day'} spend in ${momentum.lookback}d</span>`;
+    } else if(win.pctChange!=null){
+      const up = win.pctChange >= 0;
+      subline = `<span style="color:${up?'var(--expense)':'var(--income)'};">${up?'↑':'↓'} ${Math.abs(win.pctChange).toFixed(0)}% vs previous period</span>`;
+    } else {
+      subline = `<span style="color:var(--ink-faint);">Not enough history yet to compare</span>`;
+    }
+    return `<div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">${label}</div><div class="kpi-val expense num">${gbp(win.current)}</div><div class="kpi-sub">${subline}</div></div>`;
+  }
+  document.getElementById('insights-momentum-stats').innerHTML = momentumCardHTML(momentum.win7,'Last 7 days') + momentumCardHTML(momentum.win30,'Last 30 days');
+
   document.getElementById('insights-period-seg').addEventListener('click', e=>{
     const b = e.target.closest('button'); if(!b) return;
     UI.insightsPeriod = b.dataset.p;
@@ -3444,6 +3526,30 @@ function renderInsights(c){
   drawDowChart(dow, dowMax);
   drawSavingsRateChart(savingsRate);
   drawYoyChart(yoy);
+  drawMomentumChart(momentum);
+}
+function drawMomentumChart(momentum){
+  const ctx = document.getElementById('insights-momentum-chart');
+  if(!ctx) return;
+  if(UI.charts.momentum) UI.charts.momentum.destroy();
+  UI.charts.momentum = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: momentum.series7.map(s=>ukDateShort(s.date)),
+      datasets: [{ label:'Trailing 7-day spend', data: momentum.series7.map(s=>s.sum), tension:.3, fill:true, borderWidth:2, pointRadius:0,
+        borderColor:cssVar('--expense'), backgroundColor:hexToRgba(cssVar('--expense'),.08) }],
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index', intersect:false},
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{
+        title:(items)=> `Trailing 7 days ending ${items[0].label}`,
+        label:(item)=> ` ${gbp(item.parsed.y)}`,
+      } } },
+      scales:{ y:{ ticks:{callback:(v)=>'£'+v.toLocaleString('en-GB'), font:{size:11}, color:chartTickColor()}, grid:{color:chartGridColor()} },
+                x:{ grid:{display:false}, ticks:{font:{size:10}, color:chartTickColor(), maxTicksLimit:10} } }
+    }
+  });
 }
 function drawSavingsRateChart(series){
   const ctx = document.getElementById('insights-savings-rate-chart');
@@ -4033,7 +4139,7 @@ function deleteCategory(name){
     DB.regularCategories = DB.regularCategories.filter(n=>n!==name);
     DB.discretionaryCategories = DB.discretionaryCategories.filter(n=>n!==name);
     DB.investmentCategories = DB.investmentCategories.filter(n=>n!==name);
-    DB.pendingCharges = DB.pendingCharges.filter(p=>p.category!==name);
+    DB.pendingCards = DB.pendingCards.filter(c=>c.category!==name);
     delete DB.budgets[name];
     scheduleSave(); closeModal(); renderContent(); toast('Category deleted');
   };
@@ -4837,7 +4943,7 @@ function handleRestoreFile(file){
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
       discretionaryCategories: Array.isArray(parsed.discretionaryCategories) ? parsed.discretionaryCategories : [],
       investmentCategories: Array.isArray(parsed.investmentCategories) ? parsed.investmentCategories : [],
-      pendingCharges: Array.isArray(parsed.pendingCharges) ? parsed.pendingCharges : [],
+      pendingCards: Array.isArray(parsed.pendingCards) ? parsed.pendingCards : [],
       lastImport: (parsed.lastImport && typeof parsed.lastImport==='object') ? parsed.lastImport : null,
     };
     const currentCount = DB.transactions.length;
@@ -4916,7 +5022,7 @@ async function init(){
   if(!DB.accounts) DB.accounts = [];
   if(!DB.discretionaryCategories) DB.discretionaryCategories = [];
   if(!DB.investmentCategories) DB.investmentCategories = [];
-  if(!DB.pendingCharges) DB.pendingCharges = [];
+  if(!DB.pendingCards) DB.pendingCards = [];
   if(DB.lastImport === undefined) DB.lastImport = null;
   if(!loaded) scheduleSave();
 
