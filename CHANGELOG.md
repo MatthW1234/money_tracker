@@ -1,5 +1,50 @@
 # Pocket Ledger changelog
 
+## 1.10 — investment account reconciliation
+
+### Corrected
+
+- Replaced the ambiguous **Invested** total with separate **Gross
+  contributions**, **Withdrawals**, **Net contributions**, **Current account
+  value**, and **Market movement** figures.
+- Withdrawals from investment accounts now reduce net contributions rather than
+  leaving historical funding permanently in the headline total.
+- Account-level summaries distinguish archived investment products from active
+  accounts, so a closed Trading 212 Invest account no longer inflates the active
+  Stocks & Shares ISA comparison.
+
+### Added
+
+- Transfers may now have unequal bank and investment sides when a provider
+  deducts a deposit or FX fee. The bank statement amount remains unchanged, the
+  amount actually credited becomes the contribution, and the difference is
+  retained as a transfer cost.
+- Lifetime gross funding, withdrawals, net funding, recorded transfer costs,
+  current value and inferred market movement are shown for each investment
+  account.
+- Archived investment accounts and their valuation history remain visible for
+  audit purposes but cannot receive new valuations accidentally.
+
+### Trading 212 reconciliation
+
+- The supplied Invest export confirms £90.00 deposited, £90.34 withdrawn,
+  £0.47 realised trading result and £0.13 FX fees, leaving a £0.34 gain.
+- The active Stocks & Shares ISA exports confirm 48 deposits: £5,827.67 left
+  the bank, £19.67 was charged as deposit fees, and £5,808.00 reached the ISA.
+- A companion corrected backup separates `Trading 212 Invest` (archived and
+  closed at £0) from the active `Trading 212 S&S ISA`. All 52 original bank
+  records remain present with their former categories retained in
+  `preTransferCategory`, and matching account-side entries provide a reversible
+  audit trail.
+
+### Verification
+
+- The corrected backup retains all 1,130 original transactions and 145 rules,
+  adding only 52 matching transfer sides.
+- Automated checks reconcile gross contributions of £5,898.00, withdrawals of
+  £90.34, net contributions of £5,807.66, current pre-valuation account value
+  of £5,808.00, £19.67 transfer costs and £0.34 historical market movement.
+
 ## 1.09 — investment valuation checkpoints
 
 ### Added

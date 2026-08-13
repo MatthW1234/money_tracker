@@ -634,8 +634,8 @@ textarea{ resize:vertical; min-height:60px; }
    POCKET LEDGER — single-file app logic
    ========================================================= */
 
-const APP_VERSION = '1.09';
-const SCHEMA_VERSION = 9;
+const APP_VERSION = '1.10';
+const SCHEMA_VERSION = 10;
 const STORAGE_KEY = 'pocketledger:data:v1';
 const PRE_RESTORE_KEY = 'pocketledger_pre_restore_v1';
 
@@ -3141,24 +3141,27 @@ function openConvertToTransferModal(id){
         <input type="text" id="cv-other-account" list="account-list-cv" placeholder="e.g. Savings">
         <datalist id="account-list-cv">${activeAccountNames().filter(a=>a!==t.account).map(a=>`<option value="${escAttr(a)}">`).join('')}</datalist>
       </div>
-      <p style="color:var(--ink-faint); font-size:11.5px; margin:10px 0 0;">This will link it to a matching entry on the other account and remove its category, since transfers between your own accounts aren't counted as income or spending.</p>
+      <div class="field" style="margin-top:10px;"><label>Amount ${outgoing?'received by':'sent from'} the other account (£)</label><input type="number" id="cv-other-amount" min="0.01" step="0.01" value="${Math.abs(t.amount).toFixed(2)}"><span style="font-size:10.5px;color:var(--ink-faint);">Usually the same. Enter the amount actually credited when a provider deducted a deposit or FX fee.</span></div>
+      <p style="color:var(--ink-faint); font-size:11.5px; margin:10px 0 0;">This will link it to a matching entry on the other account and remove its category. Any difference between the two sides is retained as a transfer cost, so the bank statement still reconciles.</p>
     </div>
     <div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-confirm">Convert</button></div>
   `);
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('m-confirm').onclick = ()=>{
-    const otherAccount = document.getElementById('cv-other-account').value.trim();
+    const otherAccount = document.getElementById('cv-other-account').value.trim(),otherAmount=Number(document.getElementById('cv-other-amount').value);
     if(!otherAccount){ toast('Enter the other account', 'error'); return; }
     if(otherAccount === t.account){ toast('That\u2019s the same account this transaction is already on', 'error'); return; }
+    if(!Number.isFinite(otherAmount)||otherAmount<=0){toast('Enter the positive amount on the other account','error');return;}
     ensureAccountRecord(otherAccount);
-    const tid = uid('xfer');
+    const tid = uid('xfer'),difference=Math.round((Math.abs(t.amount)-otherAmount)*100)/100;
     t.transferId = tid;
+    if(Math.abs(difference)>=0.005)t.transferFee=Math.abs(difference);
     t.preTransferCategory = t.category;
     t.category = '';
     DB.transactions.push({
-      id: uid('tx'), date: t.date, amount: -t.amount,
+      id: uid('tx'), date: t.date, amount: outgoing?otherAmount:-otherAmount,
       description: outgoing ? `Transfer from ${t.account}` : `Transfer to ${t.account}`,
-      category: '', account: otherAccount, notes: t.notes||'', source:'manual', transferId: tid, status:transactionStatus(t),
+      category: '', account: otherAccount, notes: t.notes||'', source:'manual', transferId: tid, transferFee:Math.abs(difference)>=0.005?Math.abs(difference):undefined,status:transactionStatus(t),
     });
     scheduleSave(); closeModal(); renderContent();
     toast('Converted to a transfer');
@@ -3185,6 +3188,7 @@ function revertTransfer(id){
   document.getElementById('m-confirm').onclick = ()=>{
     if(pair) DB.transactions = DB.transactions.filter(x=> x.id!==pair.id);
     delete t.transferId;
+    delete t.transferFee;
     if(hadOriginalCategory){ t.category = t.preTransferCategory; delete t.preTransferCategory; }
     scheduleSave(); closeModal(); renderContent();
     toast('Transfer tag removed');
@@ -3717,6 +3721,30 @@ function investmentTransferContributionList(list){
 }
 function investmentContributionList(list){return [...investExpenseList(list),...investmentTransferContributionList(list)].sort((a,b)=>a.date.localeCompare(b.date));}
 function sumInvest(list){ return investmentContributionList(list).reduce((s,t)=> s+Math.abs(t.amount), 0); }
+function investmentTransferWithdrawalList(list){
+  const investmentTypes=new Set(['investment','pension']);
+  return list.filter(t=>{
+    if(!t.transferId||t.amount>=0)return false;
+    const source=accountRecordFor(t.account);if(!source||!investmentTypes.has(source.type))return false;
+    return DB.transactions.some(pair=>pair.transferId===t.transferId&&pair.id!==t.id&&pair.amount>0&&!investmentTypes.has((accountRecordFor(pair.account)||{}).type));
+  });
+}
+function legacyInvestmentWithdrawalList(list){
+  return expandSplits(list).filter(t=>t.amount>0&&countsTowardTotals(t)&&/^Investment In$/i.test(t.category||''));
+}
+function investmentWithdrawalList(list){return [...investmentTransferWithdrawalList(list),...legacyInvestmentWithdrawalList(list)].sort((a,b)=>a.date.localeCompare(b.date));}
+function investmentAccountLifetimeStats(record){
+  const rows=DB.transactions.filter(t=>t.account===record.name&&transactionStatus(t)!=='pending');
+  const gross=rows.filter(t=>t.transferId&&t.amount>0).reduce((s,t)=>s+t.amount,0);
+  const withdrawals=rows.filter(t=>t.transferId&&t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0);
+  const fees=rows.filter(t=>t.transferId).reduce((s,t)=>s+Math.abs(Number(t.transferFee)||0),0);
+  const net=gross-withdrawals,currentValue=accountBalanceByName(record.name);
+  return {record,gross,withdrawals,net,fees,currentValue,marketMovement:currentValue-(Number(record.openingBalance)||0)-net};
+}
+function investmentPortfolioStats(){
+  const accounts=investmentAccountRecords(),rows=accounts.map(investmentAccountLifetimeStats);
+  return {rows,gross:rows.reduce((s,r)=>s+r.gross,0),withdrawals:rows.reduce((s,r)=>s+r.withdrawals,0),net:rows.reduce((s,r)=>s+r.net,0),fees:rows.reduce((s,r)=>s+r.fees,0),currentValue:rows.reduce((s,r)=>s+r.currentValue,0),marketMovement:rows.reduce((s,r)=>s+r.marketMovement,0)};
+}
 function discretionaryExpenseList(list){
   return expandSplits(list).filter(t=> t.amount<0 && countsTowardTotals(t) && DB.discretionaryCategories.includes(t.category));
 }
@@ -3732,14 +3760,18 @@ function investmentHeadroom(range){
   const income = sumIncome(list);
   const expense = sumExpense(list);
   const categorisedInvestAmt=investExpenseList(list).reduce((s,t)=>s+Math.abs(t.amount),0);
-  const transferredInvestAmt=investmentTransferContributionList(list).reduce((s,t)=>s+Math.abs(t.amount),0);
+  const transferContributions=investmentTransferContributionList(list);
+  const transferredInvestAmt=transferContributions.reduce((s,t)=>s+Math.abs(t.amount),0);
+  const transferCostAmt=transferContributions.reduce((s,t)=>s+Math.abs(Number(t.transferFee)||0),0);
   const investAmt = categorisedInvestAmt+transferredInvestAmt;
+  const withdrawalAmt=investmentWithdrawalList(list).reduce((s,t)=>s+Math.abs(t.amount),0);
+  const netInvestAmt=investAmt-withdrawalAmt;
   const discAmt = sumDiscretionary(list);
   const essentialAmt = Math.max(0, expense - categorisedInvestAmt - discAmt);
-  const headroom = income - essentialAmt - investAmt;
+  const headroom = income - essentialAmt - investAmt - transferCostAmt;
   const trueSurplus = headroom - discAmt;
   const rate = income > 0 ? (investAmt / income * 100) : 0;
-  return { income, expense, investAmt,categorisedInvestAmt,transferredInvestAmt,discAmt,essentialAmt,headroom,trueSurplus,rate,count:investmentContributionList(list).length };
+  return { income, expense, investAmt,withdrawalAmt,netInvestAmt,transferCostAmt,categorisedInvestAmt,transferredInvestAmt,discAmt,essentialAmt,headroom,trueSurplus,rate,count:investmentContributionList(list).length };
 }
 function investmentMonthlySeries(){
   return trendBuckets('month').map(b=>{
@@ -3764,9 +3796,9 @@ function lastInvestmentTx(){
   return all.length ? all[0] : null;
 }
 function openInvestmentValuationModal(id,preferredAccountId){
-  const accounts=investmentAccountRecords().filter(r=>!r.archived);
-  if(!accounts.length){toast('Add an investment or pension account first','error');openAccountModal(null,'investment');return;}
   const existing=id?(DB.investmentValuations||[]).find(v=>v.id===id):null;
+  const accounts=investmentAccountRecords().filter(r=>!r.archived||(existing&&r.id===existing.accountId));
+  if(!accounts.length){toast('Add an investment or pension account first','error');openAccountModal(null,'investment');return;}
   const accountId=existing?existing.accountId:(preferredAccountId&&accounts.some(r=>r.id===preferredAccountId)?preferredAccountId:accounts[0].id);
   const currentRecord=accounts.find(r=>r.id===accountId)||accounts[0];
   const suggested=existing?existing.value:accountBalanceByName(currentRecord.name);
@@ -3805,17 +3837,18 @@ function confirmDeleteInvestmentValuation(id){
   document.getElementById('m-cancel').onclick=closeModal;document.getElementById('m-delete').onclick=()=>{DB.investmentValuations=DB.investmentValuations.filter(v=>v.id!==id);scheduleSave();closeModal();renderContent();renderSidebarBits();toast('Investment valuation deleted');};
 }
 function renderInvestmentValuationPanel(){
-  const accounts=investmentAccountRecords().filter(r=>!r.archived),valuations=(DB.investmentValuations||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
+  const accounts=investmentAccountRecords(),valuations=(DB.investmentValuations||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
   if(!accounts.length)return '';
   return `<div class="panel" style="margin-bottom:16px;">
     <div class="panel-head"><div class="panel-title">Portfolio values<small>Valuations change net worth; transfers explain money added or withdrawn</small></div></div>
     ${accounts.map(record=>{
       const latest=latestInvestmentValuation(record.id),balance=accountBalanceByName(record.name),performance=latest?investmentValuationPerformance(latest):null;
+      const lifetime=investmentAccountLifetimeStats(record);
       const age=latest?Math.max(0,daysBetween(latest.date,todayISO())):null,stale=age!=null&&age>35;
       return `<div class="movers-row" style="align-items:center;">
-        <span class="movers-desc" style="white-space:normal;"><strong>${escHTML(record.name)}</strong><br><span style="font-size:10.5px;color:${stale?'var(--expense)':'var(--ink-faint)'};">${latest?`Last valued ${ukDate(latest.date)}${age?` · ${age}d ago`:''}${stale?' · update recommended':''}`:'No valuation yet · opening balance and transfers only'}</span>${performance?`<br><span style="font-size:10.5px;color:${performance.gain>=0?'var(--income)':'var(--expense)'};">Since previous value: ${gbp(performance.gain,{signed:true})} market movement · ${gbp(performance.netFlow,{signed:true})} net transfers</span>`:''}</span>
+        <span class="movers-desc" style="white-space:normal;"><strong>${escHTML(record.name)}</strong>${record.archived?' <span class="stamp-mini">archived</span>':''}<br><span style="font-size:10.5px;color:${stale?'var(--expense)':'var(--ink-faint)'};">${latest?`Last valued ${ukDate(latest.date)}${age?` · ${age}d ago`:''}${stale&&!record.archived?' · update recommended':''}`:'No valuation yet · opening balance and transfers only'}</span><br><span style="font-size:10.5px;color:var(--ink-faint);">Gross ${gbp(lifetime.gross)} · withdrawn ${gbp(lifetime.withdrawals)} · net ${gbp(lifetime.net,{signed:true})}${lifetime.fees?` · costs ${gbp(lifetime.fees)}`:''}</span>${performance?`<br><span style="font-size:10.5px;color:${performance.gain>=0?'var(--income)':'var(--expense)'};">Since previous value: ${gbp(performance.gain,{signed:true})} market movement · ${gbp(performance.netFlow,{signed:true})} net transfers</span>`:''}</span>
         <span class="movers-amt num">${gbp(balance)}</span>
-        <button class="row-icon-btn" data-action="add-valuation" data-account-id="${record.id}" title="Update value">${iconPlus()}</button>
+        ${record.archived?'':`<button class="row-icon-btn" data-action="add-valuation" data-account-id="${record.id}" title="Update value">${iconPlus()}</button>`}
       </div>`;
     }).join('')}
     ${valuations.length?`<div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px;"><div class="panel-title" style="font-size:12px;margin-bottom:6px;">Recent valuations</div>${valuations.slice(0,8).map(v=>{const r=(DB.accountRecords||[]).find(a=>a.id===v.accountId),p=investmentValuationPerformance(v);return `<div class="movers-row"><span class="movers-desc">${ukDate(v.date)} · ${escHTML(r?r.name:v.accountName)}${v.notes?`<br><span style="font-size:10.5px;color:var(--ink-faint);">${escHTML(v.notes)}</span>`:''}</span><span class="movers-amt num">${gbp(v.value)}${p?`<br><span style="font-size:10.5px;color:${p.gain>=0?'var(--income)':'var(--expense)'};">${gbp(p.gain,{signed:true})} movement</span>`:''}</span><button class="row-icon-btn" data-action="edit-valuation" data-id="${v.id}" title="Edit valuation">${iconEdit()}</button><button class="row-icon-btn" data-action="delete-valuation" data-id="${v.id}" title="Delete valuation">${iconTrash()}</button></div>`;}).join('')}</div>`:`<div class="empty-state" style="padding:22px 10px 8px;"><p>Add today’s total Trading 212 account value to establish the valuation cutover. Your older category history will remain untouched.</p></div>`}
@@ -3839,6 +3872,7 @@ function renderInvestments(c){
 
   const range = periodRange(UI.investPeriod);
   const h = investmentHeadroom(range);
+  const portfolio=investmentPortfolioStats();
   const last = lastInvestmentTx();
   const lastLabel = last ? `${ukDate(last.date)}${last.date<=todayISO() ? ` · ${Math.max(0,daysBetween(last.date, todayISO()))}d ago` : ''}` : 'No contributions yet';
   const recurring = investmentRecurring();
@@ -3856,11 +3890,14 @@ function renderInvestments(c){
     ${renderInvestmentValuationPanel()}
 
     <div class="kpi-row">
-      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Invested</div><div class="kpi-val income num">${gbp(h.investAmt)}</div><div class="kpi-sub">${h.count} contribution${h.count===1?'':'s'}${h.transferredInvestAmt?` · ${gbp(h.transferredInvestAmt)} transferred`:''}</div></div>
-      <div class="kpi-card balance"><div class="stripe"></div><div class="kpi-lbl">Contribution rate</div><div class="kpi-val num" style="color:var(--gold)">${h.rate.toFixed(1)}%</div><div class="kpi-sub">of income this period</div></div>
-      <div class="kpi-card net"><div class="stripe"></div><div class="kpi-lbl">Comfortable headroom</div><div class="kpi-val num" style="color:${h.headroom>=0?'var(--brand)':'var(--expense)'}">${gbp(h.headroom)}</div><div class="kpi-sub">beyond essentials + current investing</div></div>
-      <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Last contribution</div><div class="kpi-val num" style="font-size:16px;">${lastLabel}</div><div class="kpi-sub">${last ? escHTML(last.description) : ''}</div></div>
+      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Gross contributions</div><div class="kpi-val income num">${gbp(h.investAmt)}</div><div class="kpi-sub">${h.count} contribution${h.count===1?'':'s'} · ${range.label}</div></div>
+      <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Withdrawals</div><div class="kpi-val expense num">${gbp(h.withdrawalAmt)}</div><div class="kpi-sub">Money returned from investments · ${range.label}</div></div>
+      <div class="kpi-card balance"><div class="stripe"></div><div class="kpi-lbl">Net contributions</div><div class="kpi-val num" style="color:${h.netInvestAmt>=0?'var(--gold)':'var(--expense)'}">${gbp(h.netInvestAmt,{signed:true})}</div><div class="kpi-sub">Gross less withdrawals · ${range.label}</div></div>
+      <div class="kpi-card net"><div class="stripe"></div><div class="kpi-lbl">Current account value</div><div class="kpi-val num" style="color:var(--brand)">${gbp(portfolio.currentValue)}</div><div class="kpi-sub">All investment and pension accounts</div></div>
+      <div class="kpi-card net"><div class="stripe"></div><div class="kpi-lbl">Market movement</div><div class="kpi-val num" style="color:${portfolio.marketMovement>=0?'var(--income)':'var(--expense)'}">${gbp(portfolio.marketMovement,{signed:true})}</div><div class="kpi-sub">All time · value minus opening balances and net transfers</div></div>
     </div>
+
+    <div class="panel" style="margin-bottom:16px;"><div class="qc-line"><span>Contribution rate for ${range.label.toLowerCase()}</span><span class="num">${h.rate.toFixed(1)}%</span></div><div class="qc-line"><span>Comfortable headroom after gross contributions</span><span class="num" style="color:${h.headroom>=0?'var(--brand)':'var(--expense)'}">${gbp(h.headroom)}</span></div><div class="qc-line"><span>Last contribution</span><span class="num">${lastLabel}</span></div>${portfolio.fees?`<div class="qc-line"><span>Recorded transfer costs</span><span class="num">${gbp(portfolio.fees)}</span></div>`:''}</div>
 
     <div class="grid-2">
       <div class="panel">
@@ -3880,6 +3917,7 @@ function renderInvestments(c){
         <div class="qc-line"><span>− Essential &amp; committed spending</span><span class="num">−${gbp(h.essentialAmt)}</span></div>
         <div class="qc-line"><span>− Current investment contributions</span><span class="num">−${gbp(h.investAmt)}</span></div>
         ${h.transferredInvestAmt?`<div class="qc-line" style="padding-left:12px;"><span>· recorded as account transfers</span><span class="num">${gbp(h.transferredInvestAmt)}</span></div>`:''}
+        ${h.transferCostAmt?`<div class="qc-line"><span>− Investment transfer costs</span><span class="num">−${gbp(h.transferCostAmt)}</span></div>`:''}
         <div class="qc-line qc-total"><span>= Uncommitted headroom</span><span class="num" style="color:${h.headroom>=0?'var(--brand)':'var(--expense)'}">${gbp(h.headroom)}</span></div>
         <div class="qc-line" style="padding-left:12px;"><span>· already going to discretionary spending</span><span class="num">${gbp(h.discAmt)}</span></div>
         <div class="qc-line" style="padding-left:12px;"><span>· genuinely unallocated</span><span class="num" style="color:${h.trueSurplus>=0?'var(--income)':'var(--expense)'}">${gbp(h.trueSurplus)}</span></div>

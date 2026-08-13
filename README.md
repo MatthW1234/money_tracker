@@ -1,5 +1,35 @@
 # Pocket Ledger
 
+## Version 1.10
+
+The Investments screen now separates five concepts that were previously mixed
+inside **Invested**:
+
+- **Gross contributions** — money actually credited to investment accounts.
+- **Withdrawals** — money returned from investment accounts.
+- **Net contributions** — gross contributions minus withdrawals.
+- **Current account value** — the latest valuation plus subsequent activity.
+- **Market movement** — current value minus opening balances and net transfers.
+
+Account rows show the same lifetime bridge for each investment or pension
+account. Archived accounts remain visible as historical audit records, allowing
+an old product to show £0 without contaminating an active account comparison.
+
+Transfer conversion now accepts the amount actually received by the other
+account. This handles Trading 212 card-deposit fees correctly: a £100.70 bank
+charge can create a £100.00 ISA contribution and retain £0.70 as a transfer
+cost. The bank statement still reconciles and only £100 counts as invested.
+
+The supplied data identified two distinct products. `Trading 212 Invest`
+received £90.00 in July 2025 and returned £90.34 by November 2025. Its £0.34
+gain reconciles to £0.47 realised result less £0.13 FX fees. The active
+`Trading 212 S&S ISA` received £5,808.00 across 48 deposits; £5,827.67 left the
+bank because £19.67 was charged as deposit fees.
+
+The companion separated backup preserves every original bank record and former
+category, creates matching account-side transfer entries, archives the emptied
+Invest account, and leaves the ISA ready for its first current valuation.
+
 ## Version 1.09
 
 Investment and pension accounts now support dated valuation checkpoints. Use

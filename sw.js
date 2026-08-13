@@ -7,7 +7,7 @@
 // first for speed and only re-checked in the background.
 // Your data itself is not cached here — that's handled by the app's own storage.
 
-const CACHE = 'pocket-ledger-v12';
+const CACHE = 'pocket-ledger-v13';
 const APP_SHELL = ['./', './index.html', './manifest.json', './icon.svg'];
 const VENDOR = [
   './vendor/chart.umd.min.js',
