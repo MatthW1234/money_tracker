@@ -1,11 +1,11 @@
 {
   "name": "Pocket Ledger",
   "short_name": "Ledger",
-  "description": "Personal income & spending tracker with weekly, monthly and yearly analytics, and bank statement import.",
+  "description": "Local-first personal finance tracker with goals, sinking funds, recurring schedules, reconciliation and net worth.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
-  "orientation": "portrait-primary",
+  "orientation": "any",
   "background_color": "#F1F3EF",
   "theme_color": "#0B6E4F",
   "icons": [
