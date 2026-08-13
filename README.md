@@ -1,5 +1,41 @@
 # Pocket Ledger
 
+## Version 1.13
+
+CSV interpretation now lives in `js/import.js`. The module handles smart text
+decoding, header-based column suggestions, headerless rows, UK/ISO/US dates,
+single or separate credit/debit amount columns, currency-formatted values and
+duplicate-key construction. The existing four-step import wizard remains the
+user interface and still uses the same auto-tagging rules.
+
+This is another compatibility-preserving extraction: schema version 10 and the
+backup format are unchanged, and no bank-specific assumptions are written into
+stored transactions.
+
+## Version 1.12
+
+The core ledger and account model now lives in `js/model.js`. Backup
+normalisation and migrations, account types and records, transaction status,
+split expansion, posted balances, account lists, reconciliation balances and
+legacy account compatibility no longer live in the `index.html` UI shell.
+
+The module always reads the current live ledger through an injected accessor.
+Restoring or clearing data therefore cannot leave calculations attached to an
+older in-memory database. Schema version 10 and the JSON backup format remain
+unchanged, and `js/rules.js` is untouched.
+
+## Version 1.11
+
+Investment and account-value calculations now live in `js/investments.js`
+rather than the `index.html` monolith. The extracted model owns valuation
+checkpoints, post-valuation activity, contributions, withdrawals, transfer
+costs, lifetime account bridges and portfolio totals. The Investments and Net
+Worth screens still use the same functions and produce the same figures.
+
+This is a maintainability release: schema version 10, transactions, valuations,
+account records, imports and all auto-tagging rules are unchanged. Existing
+v1.10 data opens normally and backups remain compatible in both directions.
+
 ## Version 1.10
 
 The Investments screen now separates five concepts that were previously mixed
@@ -242,6 +278,11 @@ detected recurring contributions with a flag if one looks overdue.
 ## Files
 
 - `index.html` — the application shell and remaining interface/report logic
+- `js/model.js` — backup migration, transaction/account normalisation, balances
+  and reconciliation model
+- `js/investments.js` — investment valuation, contribution and portfolio model
+- `js/import.js` — CSV decoding, column inference, row conversion and duplicate
+  detection
 - `js/rules.js` — isolated auto-tagging rule normalisation, matching and audit
 - `js/storage.js` — IndexedDB migration, verified persistence and fallback
 - `manifest.json` — PWA manifest (name, icon, theme colour)

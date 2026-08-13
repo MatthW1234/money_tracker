@@ -1,5 +1,70 @@
 # Pocket Ledger changelog
 
+## 1.13 — CSV import engine extraction
+
+### Changed
+
+- Moved CSV text decoding, column inference, row parsing, date and money
+  conversion, and duplicate-key generation into `js/import.js`.
+- Kept the import wizard and category selection UI in `index.html`, with parsed
+  rows supplied by the extracted engine.
+- Added the import engine to the offline PWA cache.
+
+### Compatibility and verification
+
+- The ledger schema remains at version 10 and imported transaction records keep
+  their existing shape.
+- Existing auto-tagging rules are still queried through `js/rules.js`; the
+  import module does not own or rewrite rules.
+- Fixtures cover UK, ISO and US date layouts, single signed amounts, separate
+  credit/debit columns, currency symbols, parentheses, headerless data and
+  duplicate exclusion.
+
+## 1.12 — core ledger and account model extraction
+
+### Changed
+
+- Moved backup normalisation, schema migration and validation into
+  `js/model.js`.
+- Moved account types, account-record compatibility, posted/current balances,
+  transaction status, split expansion and reconciliation calculations into the
+  same model.
+- The model accesses the live ledger through dependency injection, so a restore
+  or clear operation cannot leave stale database references behind.
+- Added the core model to the offline PWA cache.
+
+### Compatibility and verification
+
+- The schema remains at version 10 and the JSON backup shape is unchanged.
+- Auto-tagging remains owned by the byte-unchanged `js/rules.js` module.
+- Legacy backups without account records still migrate into real account
+  records, and the synthetic `Imported` destination still migrates to the
+  preferred current account.
+- Regression checks cover full-backup restoration, rule and transaction
+  preservation, splits, pending transactions, transfers, opening balances and
+  reconciliation history.
+
+## 1.11 — investment model extraction
+
+### Changed
+
+- Moved investment valuations, account balances, transfer flows,
+  contribution/withdrawal classification and portfolio lifetime totals from
+  `index.html` into the dedicated `js/investments.js` model.
+- Kept rendering and user workflows in `index.html`, creating a stable boundary
+  for later UI modularisation without changing accounting behaviour.
+- Added the extracted model to the offline PWA cache.
+
+### Compatibility and verification
+
+- The backup schema remains at version 10; no transaction, account, valuation,
+  snapshot or rule migration is performed.
+- The rules and storage modules are unchanged.
+- Regression checks use the separated Trading 212 backup and retain its 145
+  rules, £5,898.00 gross contributions, £90.34 withdrawals, £5,807.66 net
+  contributions, £5,808.00 current value, £19.67 transfer costs and £0.34
+  historical market movement.
+
 ## 1.10 — investment account reconciliation
 
 ### Corrected

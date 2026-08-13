@@ -19,6 +19,9 @@
 <script src="vendor/papaparse.min.js"></script>
 <script src="js/rules.js"></script>
 <script src="js/storage.js"></script>
+<script src="js/model.js"></script>
+<script src="js/investments.js"></script>
+<script src="js/import.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -631,47 +634,16 @@ textarea{ resize:vertical; min-height:60px; }
 
 <script>
 /* =========================================================
-   POCKET LEDGER — single-file app logic
+   POCKET LEDGER — application shell and UI logic
    ========================================================= */
 
-const APP_VERSION = '1.10';
+const APP_VERSION = '1.13';
 const SCHEMA_VERSION = 10;
 const STORAGE_KEY = 'pocketledger:data:v1';
 const PRE_RESTORE_KEY = 'pocketledger_pre_restore_v1';
 
-const ACCOUNT_TYPES = [
-  {value:'current', label:'Current account', group:'asset'},
-  {value:'savings', label:'Savings account', group:'asset'},
-  {value:'cash', label:'Cash', group:'asset'},
-  {value:'investment', label:'Investment account', group:'asset'},
-  {value:'pension', label:'Pension', group:'asset'},
-  {value:'property', label:'Property', group:'asset'},
-  {value:'other_asset', label:'Other asset', group:'asset'},
-  {value:'credit_card', label:'Credit card', group:'liability'},
-  {value:'loan', label:'Loan', group:'liability'},
-  {value:'mortgage', label:'Mortgage', group:'liability'},
-  {value:'other_liability', label:'Other liability', group:'liability'},
-];
-function accountTypeConfig(type){ return ACCOUNT_TYPES.find(t=>t.value===type) || ACCOUNT_TYPES[0]; }
-function isLiabilityType(type){ return accountTypeConfig(type).group==='liability'; }
-function inferAccountType(name){
-  const n=String(name||'').toLowerCase();
-  if(/credit|card|amex/.test(n)) return 'credit_card';
-  if(/mortgage/.test(n)) return 'mortgage';
-  if(/loan/.test(n)) return 'loan';
-  if(/pension/.test(n)) return 'pension';
-  if(/investment|stocks|shares|isa/.test(n)) return 'investment';
-  if(/saving/.test(n)) return 'savings';
-  if(/cash|wallet/.test(n)) return 'cash';
-  return 'current';
-}
-function makeAccountRecord(name, type, openingBalance, extra){
-  return Object.assign({
-    id:uid('acct'), name:String(name||'').trim(), type:type||inferAccountType(name), institution:'', currency:'GBP',
-    openingBalance:Number(openingBalance)||0, openingBalanceDate:'', creditLimit:null,
-    archived:false, includeInNetWorth:true, createdAt:new Date().toISOString(),
-  }, extra||{});
-}
+const ACCOUNT_TYPES=PocketLedgerModel.ACCOUNT_TYPES;
+const RECURRING_FREQUENCIES=PocketLedgerModel.RECURRING_FREQUENCIES;
 
 const DEFAULT_CATEGORIES = [
   {name:'Salary', kind:'income'},
@@ -741,6 +713,18 @@ function nextMonthDate(day){
   if(candidate<=new Date(now.getFullYear(),now.getMonth(),now.getDate())) candidate.setMonth(candidate.getMonth()+1);
   return localISODate(candidate);
 }
+
+const {
+  isPlainObject,validISODate,finiteNumber,accountTypeConfig,isLiabilityType,inferAccountType,makeAccountRecord,
+  transactionStatus,countsTowardTotals,categoryRowsFor,expandSplits,sumIncome,sumExpense,accountRecordFor,
+  allAccountNames,activeAccountNames,isLegacyImportedAccount,preferredImportAccountName,syncLegacyAccounts,
+  ensureAccountRecord,accountOpeningBalance,accountTransactionsTo,clearedAccountBalance,reconciliationHistory,currentBalance,
+  normaliseTransaction,normaliseAccountRecord,normaliseRecurringItem,normaliseSavingsGoal,normaliseInvestmentValuation,
+  migrateAccountRecords,preferredCurrentAccountNameFromRaw,migrateLegacyImportedAssignments,normaliseDB,
+}=PocketLedgerModel.create({
+  getDB:()=>DB,uid,clamp,buildEmptyDB,defaultCategories:DEFAULT_CATEGORIES,
+  normaliseRules:PocketLedgerRules.normaliseRules,schemaVersion:SCHEMA_VERSION,appVersion:APP_VERSION,
+});
 
 function buildSeedDB(){
   const tx = [];
@@ -844,187 +828,6 @@ function buildEmptyDB(){
     netWorthSnapshots: [],
     investmentValuations: [],
   };
-}
-
-function isPlainObject(value){ return !!value && typeof value==='object' && !Array.isArray(value); }
-function validISODate(value){ return typeof value==='string' && /^\d{4}-\d{2}-\d{2}$/.test(value); }
-function finiteNumber(value, fallback){ return Number.isFinite(value) ? value : fallback; }
-function normaliseTransaction(raw){
-  if(!isPlainObject(raw)) return null;
-  const amount = Number(raw.amount);
-  if(!validISODate(raw.date) || !Number.isFinite(amount) || !String(raw.description||'').trim()) return null;
-  const status = ['pending','cleared','reconciled'].includes(raw.status) ? raw.status : 'cleared';
-  const clean = Object.assign({}, raw, {
-    id: typeof raw.id==='string' && raw.id ? raw.id : uid('tx'),
-    date: raw.date,
-    description: String(raw.description).trim(),
-    amount,
-    category: typeof raw.category==='string' ? raw.category : '',
-    account: typeof raw.account==='string' ? raw.account : '',
-    notes: typeof raw.notes==='string' ? raw.notes : '',
-    source: typeof raw.source==='string' ? raw.source : 'restored',
-    status,
-    excluded: !!raw.excluded,
-  });
-  if(Array.isArray(raw.splits)){
-    clean.splits = raw.splits.map(s=> isPlainObject(s) && Number.isFinite(Number(s.amount)) ? {
-      id: typeof s.id==='string' && s.id ? s.id : uid('split'),
-      category: typeof s.category==='string' ? s.category : '',
-      amount: Number(s.amount),
-    } : null).filter(Boolean);
-  }
-  return clean;
-}
-function normaliseAccountRecord(raw){
-  if(!isPlainObject(raw) || !String(raw.name||'').trim()) return null;
-  const type=ACCOUNT_TYPES.some(t=>t.value===raw.type) ? raw.type : inferAccountType(raw.name);
-  const openingBalance=Number(raw.openingBalance);
-  const creditLimit=raw.creditLimit==null || raw.creditLimit==='' ? null : Number(raw.creditLimit);
-  return makeAccountRecord(raw.name,type,Number.isFinite(openingBalance)?openingBalance:0,{
-    id:typeof raw.id==='string'&&raw.id?raw.id:uid('acct'),
-    institution:typeof raw.institution==='string'?raw.institution:'',
-    currency:typeof raw.currency==='string'&&raw.currency?raw.currency:'GBP',
-    openingBalanceDate:validISODate(raw.openingBalanceDate)?raw.openingBalanceDate:'',
-    creditLimit:Number.isFinite(creditLimit)&&creditLimit>0?creditLimit:null,
-    archived:!!raw.archived,
-    includeInNetWorth:raw.includeInNetWorth!==false,
-    createdAt:typeof raw.createdAt==='string'?raw.createdAt:new Date().toISOString(),
-  });
-}
-const RECURRING_FREQUENCIES=['weekly','fortnightly','four_weekly','monthly','quarterly','semiannual','annual','custom'];
-function normaliseRecurringItem(raw){
-  if(!isPlainObject(raw) || !String(raw.name||'').trim()) return null;
-  const amount=Number(raw.amount),kind=raw.kind==='income'?'income':'expense';
-  if(!Number.isFinite(amount)||amount<=0||!validISODate(raw.nextDate)) return null;
-  const frequency=RECURRING_FREQUENCIES.includes(raw.frequency)?raw.frequency:'monthly';
-  const customDays=frequency==='custom'?Math.max(1,Math.round(Number(raw.customDays)||30)):null;
-  const minAmount=raw.minAmount==null||raw.minAmount===''?null:Number(raw.minAmount);
-  const maxAmount=raw.maxAmount==null||raw.maxAmount===''?null:Number(raw.maxAmount);
-  const endDate=validISODate(raw.endDate)?raw.endDate:'';
-  let status=['active','paused','ended'].includes(raw.status)?raw.status:'active';
-  if(status==='active'&&endDate&&raw.nextDate>endDate)status='ended';
-  return {
-    id:typeof raw.id==='string'&&raw.id?raw.id:uid('rec'),name:String(raw.name).trim(),kind,
-    category:typeof raw.category==='string'?raw.category:'',account:typeof raw.account==='string'?raw.account:'',amount,
-    variable:!!raw.variable,minAmount:Number.isFinite(minAmount)&&minAmount>=0?minAmount:null,maxAmount:Number.isFinite(maxAmount)&&maxAmount>=0?maxAmount:null,
-    frequency,customDays,nextDate:raw.nextDate,anchorDay:clamp(Math.round(Number(raw.anchorDay)||Number(raw.nextDate.slice(8,10))),1,31),
-    endDate,status,
-    notes:typeof raw.notes==='string'?raw.notes:'',createdAt:typeof raw.createdAt==='string'?raw.createdAt:new Date().toISOString(),
-    lastMatchedDate:validISODate(raw.lastMatchedDate)?raw.lastMatchedDate:'',
-  };
-}
-function normaliseSavingsGoal(raw){
-  if(!isPlainObject(raw)||!String(raw.name||'').trim())return null;
-  const targetAmount=Number(raw.targetAmount);if(!Number.isFinite(targetAmount)||targetAmount<=0)return null;
-  const activity=Array.isArray(raw.activity)?raw.activity.map(entry=>{
-    if(!isPlainObject(entry)||!validISODate(entry.date)||!Number.isFinite(Number(entry.amount))||Number(entry.amount)===0)return null;
-    return {id:typeof entry.id==='string'&&entry.id?entry.id:uid('ga'),date:entry.date,amount:Number(entry.amount),notes:typeof entry.notes==='string'?entry.notes:''};
-  }).filter(Boolean):[];
-  return {
-    id:typeof raw.id==='string'&&raw.id?raw.id:uid('goal'),name:String(raw.name).trim(),
-    type:raw.type==='sinking_fund'?'sinking_fund':'goal',targetAmount,targetDate:validISODate(raw.targetDate)?raw.targetDate:'',
-    account:typeof raw.account==='string'?raw.account:'',priority:['high','medium','low'].includes(raw.priority)?raw.priority:'medium',
-    status:raw.status==='paused'?'paused':'active',notes:typeof raw.notes==='string'?raw.notes:'',
-    createdAt:typeof raw.createdAt==='string'?raw.createdAt:new Date().toISOString(),activity,
-  };
-}
-function normaliseInvestmentValuation(raw,accountRecords){
-  if(!isPlainObject(raw)||!validISODate(raw.date)||!Number.isFinite(Number(raw.value))||Number(raw.value)<0)return null;
-  const record=accountRecords.find(r=>r.id===raw.accountId)||accountRecords.find(r=>r.name===raw.accountName);
-  if(!record||!['investment','pension'].includes(record.type))return null;
-  return {
-    id:typeof raw.id==='string'&&raw.id?raw.id:uid('val'),accountId:record.id,accountName:record.name,
-    date:raw.date,value:Number(raw.value),currency:typeof raw.currency==='string'&&raw.currency?raw.currency:(record.currency||'GBP'),
-    source:['manual','csv','api'].includes(raw.source)?raw.source:'manual',notes:typeof raw.notes==='string'?raw.notes:'',
-    createdAt:typeof raw.createdAt==='string'?raw.createdAt:new Date().toISOString(),updatedAt:typeof raw.updatedAt==='string'?raw.updatedAt:null,
-  };
-}
-function migrateAccountRecords(raw, transactions){
-  const records=Array.isArray(raw.accountRecords) ? raw.accountRecords.map(normaliseAccountRecord).filter(Boolean) : [];
-  const migratedFromLegacy=records.length===0;
-  const names=new Set();
-  (Array.isArray(raw.accounts)?raw.accounts:[]).forEach(n=>{if(typeof n==='string'&&n.trim())names.add(n.trim());});
-  if(isPlainObject(raw.accountStartingBalances)) Object.keys(raw.accountStartingBalances).forEach(n=>names.add(n));
-  transactions.forEach(t=>{if(t.account)names.add(t.account);});
-  let position=0;
-  names.forEach(name=>{
-    if(records.some(r=>r.name.toLowerCase()===name.toLowerCase())) return;
-    let opening=0;
-    if(isPlainObject(raw.accountStartingBalances)&&Object.prototype.hasOwnProperty.call(raw.accountStartingBalances,name)) opening=Number(raw.accountStartingBalances[name])||0;
-    else if(migratedFromLegacy&&position===0) opening=Number(raw.startingBalance)||0;
-    records.push(makeAccountRecord(name,inferAccountType(name),opening));
-    position++;
-  });
-  return records;
-}
-function isLegacyImportedAccount(name){return String(name||'').trim().toLowerCase()==='imported';}
-function preferredCurrentAccountNameFromRaw(raw,transactions){
-  const names=[];
-  const add=name=>{name=String(name||'').trim();if(name&&!isLegacyImportedAccount(name)&&!names.some(n=>n.toLowerCase()===name.toLowerCase()))names.push(name);};
-  (Array.isArray(raw.accountRecords)?raw.accountRecords:[]).filter(r=>r&&r.type==='current'&&!r.archived).forEach(r=>add(r.name));
-  if(isPlainObject(raw.accountStartingBalances))Object.keys(raw.accountStartingBalances).forEach(add);
-  (Array.isArray(raw.accounts)?raw.accounts:[]).forEach(add);transactions.forEach(t=>add(t.account));
-  return names.find(n=>n.toLowerCase()==='current account')||names[0]||'Current Account';
-}
-function migrateLegacyImportedAssignments(raw,transactions){
-  const count=transactions.filter(t=>isLegacyImportedAccount(t.account)).length;
-  if(!count)return {count:0,target:''};
-  const target=preferredCurrentAccountNameFromRaw(raw,transactions);
-  transactions.forEach(t=>{if(isLegacyImportedAccount(t.account)){t.account=target;delete t.accountId;}});
-  return {count,target};
-}
-function normaliseDB(raw){
-  if(!isPlainObject(raw)) throw new Error('The backup does not contain a ledger object.');
-  if(!Array.isArray(raw.transactions) || !Array.isArray(raw.categories)) throw new Error('Transactions or categories are missing.');
-  const transactions=raw.transactions.map(normaliseTransaction);
-  const invalidTransactions = transactions.filter(t=>!t).length;
-  if(invalidTransactions) throw new Error(`${invalidTransactions} transaction${invalidTransactions===1?' is':'s are'} invalid.`);
-  const importedMigration=migrateLegacyImportedAssignments(raw,transactions);
-  const accountRecords=migrateAccountRecords(raw,transactions).filter(r=>!isLegacyImportedAccount(r.name));
-  const base = buildEmptyDB();
-  const clean = Object.assign(base, {
-    schemaVersion: SCHEMA_VERSION,
-    appVersion: APP_VERSION,
-    startingBalance: finiteNumber(Number(raw.startingBalance), 0),
-    categories: raw.categories.filter(c=>isPlainObject(c) && typeof c.name==='string' && ['income','expense'].includes(c.kind)).map(c=>({name:c.name,kind:c.kind})),
-    rules: PocketLedgerRules.normaliseRules(raw.rules),
-    transactions,
-    wishlist: Array.isArray(raw.wishlist) ? raw.wishlist.filter(isPlainObject) : [],
-    dismissedRecurring: Array.isArray(raw.dismissedRecurring) ? raw.dismissedRecurring.filter(x=>typeof x==='string') : [],
-    regularCategories: Array.isArray(raw.regularCategories) ? raw.regularCategories.filter(x=>typeof x==='string') : [],
-    recurringItems: Array.isArray(raw.recurringItems) ? raw.recurringItems.map(normaliseRecurringItem).filter(Boolean) : [],
-    savingsGoals: Array.isArray(raw.savingsGoals) ? raw.savingsGoals.map(normaliseSavingsGoal).filter(Boolean) : [],
-    budgets: isPlainObject(raw.budgets) ? raw.budgets : {},
-    accountStartingBalances: isPlainObject(raw.accountStartingBalances) ? raw.accountStartingBalances : {},
-    merchantAliases: isPlainObject(raw.merchantAliases) ? raw.merchantAliases : {},
-    accounts: Array.isArray(raw.accounts) ? raw.accounts.filter(x=>typeof x==='string') : [],
-    accountRecords,
-    discretionaryCategories: Array.isArray(raw.discretionaryCategories) ? raw.discretionaryCategories.filter(x=>typeof x==='string') : [],
-    investmentCategories: Array.isArray(raw.investmentCategories) ? raw.investmentCategories.filter(x=>typeof x==='string') : [],
-    pendingCards: Array.isArray(raw.pendingCards) ? raw.pendingCards.filter(isPlainObject) : [],
-    reconciliations: isPlainObject(raw.reconciliations) ? raw.reconciliations : {},
-    lastBackupAt: typeof raw.lastBackupAt==='string' ? raw.lastBackupAt : null,
-    lastImport: isPlainObject(raw.lastImport) ? raw.lastImport : null,
-    netWorthSnapshots:Array.isArray(raw.netWorthSnapshots) ? raw.netWorthSnapshots.filter(s=>isPlainObject(s)&&validISODate(s.date)&&Number.isFinite(Number(s.netWorth))).map(s=>Object.assign({},s,{netWorth:Number(s.netWorth),totalAssets:Number(s.totalAssets)||0,totalLiabilities:Number(s.totalLiabilities)||0})) : [],
-    investmentValuations:Array.isArray(raw.investmentValuations) ? raw.investmentValuations.map(v=>normaliseInvestmentValuation(v,accountRecords)).filter(Boolean) : [],
-  });
-  if(importedMigration.count){
-    clean.recurringItems.forEach(item=>{if(isLegacyImportedAccount(item.account))item.account=importedMigration.target;});
-    clean.savingsGoals.forEach(goal=>{if(isLegacyImportedAccount(goal.account))goal.account=importedMigration.target;});
-    if(clean.lastImport&&isLegacyImportedAccount(clean.lastImport.account))clean.lastImport.account=importedMigration.target;
-    if(clean.reconciliations.Imported){
-      const existing=clean.reconciliations[importedMigration.target]||{history:[]};
-      existing.history=[...(existing.history||[]),...(clean.reconciliations.Imported.history||[])];clean.reconciliations[importedMigration.target]=existing;delete clean.reconciliations.Imported;
-    }
-    clean.lastAccountMigration={kind:'legacy-imported',count:importedMigration.count,target:importedMigration.target,migratedAt:new Date().toISOString()};
-  }
-  clean.accounts=accountRecords.map(r=>r.name);
-  clean.accountStartingBalances={};
-  accountRecords.forEach(r=>{clean.accountStartingBalances[r.name]=r.openingBalance;});
-  clean.transactions.forEach(t=>{const r=accountRecords.find(a=>a.name===t.account);if(r)t.accountId=r.id;});
-  if(accountRecords.length) clean.startingBalance=accountRecords[0].openingBalance;
-  if(!clean.categories.length) clean.categories = JSON.parse(JSON.stringify(DEFAULT_CATEGORIES));
-  return clean;
 }
 
 /* ---------- persistence ---------- */
@@ -1285,7 +1088,6 @@ function suggestCategory(description, amount){
 function txInRange(from, to){
   return DB.transactions.filter(t=> t.date >= from && t.date <= to);
 }
-function countsTowardTotals(t){ return !t.transferId && !t.excluded && t.status!=='pending'; }
 // A transaction can optionally carry t.splits = [{id, category, amount}, ...]
 // instead of a single t.category, when its total is allocated across more
 // than one category (e.g. one supermarket trip covering groceries and
@@ -1295,102 +1097,22 @@ function countsTowardTotals(t){ return !t.transferId && !t.excluded && t.status!
 // only cares about the total cash amount (sumIncome, sumExpense, balance,
 // duplicate detection, merchant grouping) can keep using the plain list,
 // since a split doesn't change the transaction's date, account, or total.
-function categoryRowsFor(t){
-  if(t.splits && t.splits.length){
-    return t.splits.map(s=> Object.assign({}, t, {category:s.category, amount:s.amount, splitId:s.id, isSplitPart:true}));
-  }
-  return [t];
-}
-function expandSplits(list){
-  const out = [];
-  list.forEach(t=> categoryRowsFor(t).forEach(r=>out.push(r)));
-  return out;
-}
-function sumIncome(list){ return list.reduce((s,t)=> (t.amount>0 && countsTowardTotals(t)) ? s+t.amount : s, 0); }
-function sumExpense(list){ return list.reduce((s,t)=> (t.amount<0 && countsTowardTotals(t)) ? s+Math.abs(t.amount) : s, 0); }
-function currentBalance(){
-  const liquidTypes=new Set(['current','savings','cash','credit_card']);
-  const names=allAccountNames().filter(name=>liquidTypes.has((accountRecordFor(name)||{}).type||'current'));
-  const opening = names.length ? names.reduce((sum,name)=>sum+accountOpeningBalance(name),0) : ((DB.accountRecords||[]).length?0:(Number(DB.startingBalance)||0));
-  return opening + DB.transactions.reduce((s,t)=> t.status==='pending'||(t.account&&!names.includes(t.account)) ? s : s+t.amount, 0);
-}
-function accountRecordFor(name){ return (DB.accountRecords||[]).find(r=>r.name===name) || null; }
-function allAccountNames(){
-  const names = new Set((DB.accountRecords||[]).map(r=>r.name));
-  (DB.accounts||[]).forEach(a=>names.add(a));
-  Object.keys(DB.accountStartingBalances).forEach(a=> names.add(a));
-  DB.transactions.forEach(t=>{ if(t.account) names.add(t.account); });
-  return [...names].sort();
-}
-function activeAccountNames(){
-  const active=(DB.accountRecords||[]).filter(r=>!r.archived).map(r=>r.name);
-  DB.transactions.forEach(t=>{if(t.account&&!accountRecordFor(t.account)&&!active.includes(t.account))active.push(t.account);});
-  return active.sort();
-}
-function preferredImportAccountName(){
-  const records=(DB.accountRecords||[]).filter(r=>!r.archived&&!isLegacyImportedAccount(r.name));
-  return (records.find(r=>r.name.toLowerCase()==='current account')||records.find(r=>r.type==='current')||records[0]||{}).name||'';
-}
-function ensureAccountRecord(name){
-  name=String(name||'').trim();if(!name)return null;
-  let record=accountRecordFor(name);
-  if(!record){record=makeAccountRecord(name,inferAccountType(name),0);DB.accountRecords.push(record);syncLegacyAccounts();}
-  return record;
-}
 /* =========================================================
    INVESTMENT VALUATIONS
    Valuations are end-of-day account checkpoints. They are deliberately
    separate from transactions: market movement changes net worth, but is not
    income or spending. Transactions after the latest checkpoint remain live.
    ========================================================= */
-function investmentAccountRecords(){
-  return (DB.accountRecords||[]).filter(r=>['investment','pension'].includes(r.type));
-}
-function investmentValuationsForAccount(accountId){
-  return (DB.investmentValuations||[]).filter(v=>v.accountId===accountId).sort((a,b)=>a.date.localeCompare(b.date)||(a.createdAt||'').localeCompare(b.createdAt||''));
-}
-function latestInvestmentValuation(accountId,asOfDate){
-  const limit=asOfDate||todayISO();
-  const rows=investmentValuationsForAccount(accountId).filter(v=>v.date<=limit);
-  return rows.length?rows[rows.length-1]:null;
-}
-function accountTransactionsTotal(account,fromExclusive,toInclusive){
-  return DB.transactions.reduce((sum,t)=>{
-    if(t.account!==account||transactionStatus(t)==='pending')return sum;
-    if(fromExclusive&&t.date<=fromExclusive)return sum;
-    if(toInclusive&&t.date>toInclusive)return sum;
-    return sum+Number(t.amount||0);
-  },0);
-}
-function accountTransferFlow(account,fromExclusive,toInclusive){
-  return DB.transactions.reduce((sum,t)=>{
-    if(t.account!==account||!t.transferId||transactionStatus(t)==='pending')return sum;
-    if(fromExclusive&&t.date<=fromExclusive)return sum;
-    if(toInclusive&&t.date>toInclusive)return sum;
-    return sum+Number(t.amount||0);
-  },0);
-}
-function accountBalanceByName(account,asOfDate){
-  const record=accountRecordFor(account),limit=asOfDate||todayISO();
-  if(record&&['investment','pension'].includes(record.type)){
-    const valuation=latestInvestmentValuation(record.id,limit);
-    if(valuation)return valuation.value+accountTransactionsTotal(account,valuation.date,limit);
-  }
-  const list=DB.transactions.filter(t=>t.account===account&&transactionStatus(t)!=='pending'&&(!asOfDate||t.date<=asOfDate));
-  return accountOpeningBalance(account)+list.reduce((sum,t)=>sum+Number(t.amount||0),0);
-}
-function investmentValuationPerformance(valuation){
-  const rows=investmentValuationsForAccount(valuation.accountId),index=rows.findIndex(v=>v.id===valuation.id);
-  if(index<=0)return null;
-  const previous=rows[index-1],record=(DB.accountRecords||[]).find(r=>r.id===valuation.accountId);
-  if(!record)return null;
-  const netFlow=accountTransferFlow(record.name,previous.date,valuation.date);
-  const gain=valuation.value-previous.value-netFlow;
-  return {previous,netFlow,gain,rate:previous.value+Math.max(0,netFlow)>0?gain/(previous.value+Math.max(0,netFlow))*100:0};
-}
-function latestInvestmentPerformance(record){
-  const latest=latestInvestmentValuation(record.id);return latest?investmentValuationPerformance(latest):null;
-}
+const {
+  investmentAccountRecords,investmentValuationsForAccount,latestInvestmentValuation,
+  accountTransactionsTotal,accountTransferFlow,accountBalanceByName,
+  investmentValuationPerformance,latestInvestmentPerformance,investExpenseList,
+  investmentTransferContributionList,investmentContributionList,sumInvest,
+  investmentTransferWithdrawalList,legacyInvestmentWithdrawalList,investmentWithdrawalList,
+  investmentAccountLifetimeStats,investmentPortfolioStats,
+}=PocketLedgerInvestments.create({
+  getDB:()=>DB,todayISO,transactionStatus,accountOpeningBalance,expandSplits,countsTowardTotals,
+});
 function perAccountBalances(){
   const accounts = new Set((DB.accountRecords||[]).map(r=>r.name));
   (DB.accounts||[]).forEach(a=>accounts.add(a));
@@ -2643,29 +2365,10 @@ function drawYTDChart(){
 /* =========================================================
    ACCOUNT RECONCILIATION
    ========================================================= */
-function transactionStatus(t){ return ['pending','cleared','reconciled'].includes(t.status) ? t.status : 'cleared'; }
 function statusLabel(status){ return status==='reconciled' ? 'Reconciled' : (status==='pending' ? 'Pending' : 'Cleared'); }
 function statusPillHTML(status){
   status = ['pending','cleared','reconciled'].includes(status) ? status : 'cleared';
   return `<span class="status-pill status-${status}">${statusLabel(status)}</span>`;
-}
-function accountOpeningBalance(account){
-  const record=accountRecordFor(account);
-  if(record) return Number(record.openingBalance)||0;
-  if(Object.prototype.hasOwnProperty.call(DB.accountStartingBalances, account)) return Number(DB.accountStartingBalances[account]) || 0;
-  return DB.accounts[0]===account ? (Number(DB.startingBalance)||0) : 0;
-}
-function accountTransactionsTo(account, date){
-  return DB.transactions.filter(t=>t.account===account && t.date<=date).sort((a,b)=>a.date.localeCompare(b.date) || a.description.localeCompare(b.description));
-}
-function clearedAccountBalance(account, date){
-  return accountOpeningBalance(account) + accountTransactionsTo(account,date)
-    .filter(t=>transactionStatus(t)!=='pending')
-    .reduce((sum,t)=>sum+Number(t.amount||0),0);
-}
-function reconciliationHistory(account){
-  const rec = DB.reconciliations[account];
-  return rec && Array.isArray(rec.history) ? rec.history : [];
 }
 function renderReconcile(c){
   const accounts = activeAccountNames();
@@ -3708,43 +3411,6 @@ function planNumbers(){
 /* =========================================================
    INVESTMENTS
    ========================================================= */
-function investExpenseList(list){
-  return expandSplits(list).filter(t=> t.amount<0 && countsTowardTotals(t) && DB.investmentCategories.includes(t.category));
-}
-function investmentTransferContributionList(list){
-  const investmentTypes=new Set(['investment','pension']);
-  return list.filter(t=>{
-    if(!t.transferId||t.amount<=0)return false;
-    const destination=accountRecordFor(t.account);if(!destination||!investmentTypes.has(destination.type))return false;
-    return DB.transactions.some(pair=>pair.transferId===t.transferId&&pair.id!==t.id&&pair.amount<0&&!investmentTypes.has((accountRecordFor(pair.account)||{}).type));
-  }).map(t=>Object.assign({},t,{amount:-Math.abs(t.amount),category:'Investment transfer',contributionSource:'transfer'}));
-}
-function investmentContributionList(list){return [...investExpenseList(list),...investmentTransferContributionList(list)].sort((a,b)=>a.date.localeCompare(b.date));}
-function sumInvest(list){ return investmentContributionList(list).reduce((s,t)=> s+Math.abs(t.amount), 0); }
-function investmentTransferWithdrawalList(list){
-  const investmentTypes=new Set(['investment','pension']);
-  return list.filter(t=>{
-    if(!t.transferId||t.amount>=0)return false;
-    const source=accountRecordFor(t.account);if(!source||!investmentTypes.has(source.type))return false;
-    return DB.transactions.some(pair=>pair.transferId===t.transferId&&pair.id!==t.id&&pair.amount>0&&!investmentTypes.has((accountRecordFor(pair.account)||{}).type));
-  });
-}
-function legacyInvestmentWithdrawalList(list){
-  return expandSplits(list).filter(t=>t.amount>0&&countsTowardTotals(t)&&/^Investment In$/i.test(t.category||''));
-}
-function investmentWithdrawalList(list){return [...investmentTransferWithdrawalList(list),...legacyInvestmentWithdrawalList(list)].sort((a,b)=>a.date.localeCompare(b.date));}
-function investmentAccountLifetimeStats(record){
-  const rows=DB.transactions.filter(t=>t.account===record.name&&transactionStatus(t)!=='pending');
-  const gross=rows.filter(t=>t.transferId&&t.amount>0).reduce((s,t)=>s+t.amount,0);
-  const withdrawals=rows.filter(t=>t.transferId&&t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0);
-  const fees=rows.filter(t=>t.transferId).reduce((s,t)=>s+Math.abs(Number(t.transferFee)||0),0);
-  const net=gross-withdrawals,currentValue=accountBalanceByName(record.name);
-  return {record,gross,withdrawals,net,fees,currentValue,marketMovement:currentValue-(Number(record.openingBalance)||0)-net};
-}
-function investmentPortfolioStats(){
-  const accounts=investmentAccountRecords(),rows=accounts.map(investmentAccountLifetimeStats);
-  return {rows,gross:rows.reduce((s,r)=>s+r.gross,0),withdrawals:rows.reduce((s,r)=>s+r.withdrawals,0),net:rows.reduce((s,r)=>s+r.net,0),fees:rows.reduce((s,r)=>s+r.fees,0),currentValue:rows.reduce((s,r)=>s+r.currentValue,0),marketMovement:rows.reduce((s,r)=>s+r.marketMovement,0)};
-}
 function discretionaryExpenseList(list){
   return expandSplits(list).filter(t=> t.amount<0 && countsTowardTotals(t) && DB.discretionaryCategories.includes(t.category));
 }
@@ -5299,6 +4965,7 @@ function applyRuleToUncategorised(keyword, category, direction){
 /* =========================================================
    IMPORT
    ========================================================= */
+const ImportEngine=PocketLedgerImport;
 function newImportState(){
   return {
     step: 1,
@@ -5398,20 +5065,10 @@ async function handleFile(file){
   st.fileName = file.name;
   try{
     const buf = await file.arrayBuffer();
-    const text = decodeSmart(buf);
-    const result = Papa.parse(text.trim(), {skipEmptyLines:true});
-    let rows = result.data;
-    if(!rows.length){ toast('Could not read any rows from that file', 'error'); return; }
-    if(st.hasHeader){
-      st.headers = rows[0].map(h=>String(h||'').trim());
-      st.rows = rows.slice(1);
-    } else {
-      st.headers = rows[0].map((_,i)=>'Column '+(i+1));
-      st.rows = rows;
-    }
-    // Drop fully-blank trailing rows some banks add at the end of the export.
-    st.rows = st.rows.filter(r=> r.some(cell=> String(cell||'').trim() !== ''));
-    st.mapping = guessMapping(st.headers);
+    const text=ImportEngine.decodeSmart(buf);
+    const parsed=ImportEngine.parseCsvText(text,st.hasHeader,csvText=>Papa.parse(csvText,{skipEmptyLines:true}));
+    if(!parsed.rows.length){toast('Could not read any rows from that file','error');return;}
+    st.headers=parsed.headers;st.rows=parsed.rows;st.mapping=parsed.mapping;
     st.step = 2;
     renderImport(document.getElementById('content'));
     toast(`Loaded ${st.rows.length} rows from ${file.name}`);
@@ -5420,32 +5077,6 @@ async function handleFile(file){
     toast('Could not read that file', 'error');
   }
 }
-function decodeSmart(buf){
-  // Most exports are UTF-8, but some UK banks (e.g. Santander) export in
-  // Windows-1252, where £ is a single byte that UTF-8 mangles into "�".
-  // Try UTF-8 first; if it looks corrupted, fall back to Windows-1252.
-  const utf8 = new TextDecoder('utf-8').decode(buf);
-  if(utf8.indexOf('\ufffd') === -1) return utf8;
-  try{ return new TextDecoder('windows-1252').decode(buf); }
-  catch(e){ return utf8; }
-}
-function guessMapping(headers){
-  const find = (names)=>{
-    for(const n of names){
-      const idx = headers.findIndex(h=> h.toLowerCase().replace(/[^a-z]/g,'').includes(n));
-      if(idx>-1) return headers[idx];
-    }
-    return '';
-  };
-  const date = find(['date']);
-  const description = find(['description','details','narrative','memo','reference']);
-  const moneyIn = find(['moneyin','creditamount','paidin','credit']);
-  const moneyOut = find(['moneyout','debitamount','paidout','debit']);
-  const amount = find(['amount','value','transactionamount']);
-  const mode = (moneyIn||moneyOut) && !amount ? 'split' : 'single';
-  return {date, description, mode, amount: amount||'', moneyIn: moneyIn||'', moneyOut: moneyOut||''};
-}
-
 function renderImportStep2(body){
   const st = UI.importState;
   const opts = (sel)=> `<option value="">— not in file —</option>` + st.headers.map(h=>`<option value="${escAttr(h)}" ${h===sel?'selected':''}>${escHTML(h)}</option>`).join('');
@@ -5518,75 +5149,11 @@ function renderImportStep2(body){
   };
 }
 
-function parseImportRow(r, st){
-  const hIdx = (name)=> st.headers.indexOf(name);
-  const dIdx = hIdx(st.mapping.date), descIdx = hIdx(st.mapping.description);
-  if(dIdx<0 || descIdx<0) return null;
-  const date = parseAnyDate(r[dIdx], st.dateFormat);
-  const description = String(r[descIdx]||'').trim();
-  let amount = 0;
-  if(st.mapping.mode==='single'){
-    const aIdx = hIdx(st.mapping.amount);
-    let v = parseMoney(r[aIdx]);
-    if(!st.negativeIsOutgoing) v = -v;
-    amount = v;
-  } else {
-    const inIdx = hIdx(st.mapping.moneyIn), outIdx = hIdx(st.mapping.moneyOut);
-    const inV = inIdx>-1 ? parseMoney(r[inIdx]) : 0;
-    const outV = outIdx>-1 ? parseMoney(r[outIdx]) : 0;
-    amount = inV - Math.abs(outV);
-  }
-  return {date, description, amount};
-}
-function parseMoney(v){
-  if(v===undefined||v===null||v==='') return 0;
-  let s = String(v).trim();
-  if(s==='') return 0;
-  let neg = false;
-  if(/^\(.*\)$/.test(s)){ neg = true; s = s.slice(1,-1); }
-  // Strip everything except digits, minus and decimal point — covers £, $,
-  // "GBP", stray "�" from encoding issues, thousands separators, etc.
-  s = s.replace(/[^0-9.\-]/g, '');
-  if(s.indexOf('-') > -1){ neg = true; s = s.replace(/-/g,''); }
-  if(s==='') return 0;
-  const n = parseFloat(s);
-  return isNaN(n) ? 0 : (neg ? -n : n);
-}
-function parseAnyDate(v, fmt){
-  if(!v) return '';
-  const s = String(v).trim();
-  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if(m) return `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
-  m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
-  if(m){
-    let a=parseInt(m[1]), b=parseInt(m[2]), y=m[3];
-    if(y.length===2) y = (parseInt(y)>50?'19':'20')+y;
-    let day,month;
-    if(fmt==='MDY'){ month=a; day=b; } else { day=a; month=b; }
-    if(month>12){ const t=month; month=day; day=t; }
-    return `${y}-${pad(month)}-${pad(day)}`;
-  }
-  const d = new Date(s);
-  if(!isNaN(d)) return localISODate(d);
-  return '';
-}
-function pad(n){ return String(n).padStart(2,'0'); }
+function parseImportRow(row,state){return ImportEngine.parseImportRow(row,state,localISODate);}
 
 function buildParsedRows(){
   const st = UI.importState;
-  const existingKeys = new Set(DB.transactions.map(t=> t.date+'|'+t.description.trim().toUpperCase()+'|'+t.amount.toFixed(2)));
-  st.parsed = st.rows.map((r,i)=>{
-    const p = parseImportRow(r, st);
-    if(!p) return null;
-    const key = p.date+'|'+p.description.trim().toUpperCase()+'|'+p.amount.toFixed(2);
-    return {
-      rowId: 'imp_'+i,
-      date: p.date, description: p.description, amount: p.amount,
-      category: suggestCategory(p.description, p.amount),
-      duplicate: existingKeys.has(key),
-      include: !existingKeys.has(key),
-    };
-  }).filter(Boolean);
+  st.parsed=ImportEngine.buildParsedRows(st,DB.transactions,suggestCategory,localISODate);
 }
 
 function renderImportStep3(body){
@@ -5797,13 +5364,6 @@ function accountTypeOptions(selected){
   const assets=ACCOUNT_TYPES.filter(t=>t.group==='asset'),liabilities=ACCOUNT_TYPES.filter(t=>t.group==='liability');
   const opts=arr=>arr.map(t=>`<option value="${t.value}" ${t.value===selected?'selected':''}>${t.label}</option>`).join('');
   return `<optgroup label="Assets">${opts(assets)}</optgroup><optgroup label="Liabilities">${opts(liabilities)}</optgroup>`;
-}
-function syncLegacyAccounts(){
-  DB.accounts=(DB.accountRecords||[]).map(r=>r.name);
-  DB.accountStartingBalances={};
-  DB.accountRecords.forEach(r=>{DB.accountStartingBalances[r.name]=Number(r.openingBalance)||0;});
-  DB.transactions.forEach(t=>{const r=accountRecordFor(t.account);if(r)t.accountId=r.id;});
-  DB.startingBalance=DB.accountRecords.length?(Number(DB.accountRecords[0].openingBalance)||0):0;
 }
 function legacyMovementCounts(){
   const rows=expandSplits(DB.transactions||[]);
