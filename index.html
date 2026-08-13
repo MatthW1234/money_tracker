@@ -634,8 +634,8 @@ textarea{ resize:vertical; min-height:60px; }
    POCKET LEDGER — single-file app logic
    ========================================================= */
 
-const APP_VERSION = '1.07';
-const SCHEMA_VERSION = 7;
+const APP_VERSION = '1.09';
+const SCHEMA_VERSION = 9;
 const STORAGE_KEY = 'pocketledger:data:v1';
 const PRE_RESTORE_KEY = 'pocketledger_pre_restore_v1';
 
@@ -813,6 +813,7 @@ function buildSeedDB(){
     reconciliations: {},
     lastBackupAt: null,
     netWorthSnapshots: [],
+    investmentValuations: [],
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -841,6 +842,7 @@ function buildEmptyDB(){
     reconciliations: {},
     lastBackupAt: null,
     netWorthSnapshots: [],
+    investmentValuations: [],
   };
 }
 
@@ -926,6 +928,17 @@ function normaliseSavingsGoal(raw){
     createdAt:typeof raw.createdAt==='string'?raw.createdAt:new Date().toISOString(),activity,
   };
 }
+function normaliseInvestmentValuation(raw,accountRecords){
+  if(!isPlainObject(raw)||!validISODate(raw.date)||!Number.isFinite(Number(raw.value))||Number(raw.value)<0)return null;
+  const record=accountRecords.find(r=>r.id===raw.accountId)||accountRecords.find(r=>r.name===raw.accountName);
+  if(!record||!['investment','pension'].includes(record.type))return null;
+  return {
+    id:typeof raw.id==='string'&&raw.id?raw.id:uid('val'),accountId:record.id,accountName:record.name,
+    date:raw.date,value:Number(raw.value),currency:typeof raw.currency==='string'&&raw.currency?raw.currency:(record.currency||'GBP'),
+    source:['manual','csv','api'].includes(raw.source)?raw.source:'manual',notes:typeof raw.notes==='string'?raw.notes:'',
+    createdAt:typeof raw.createdAt==='string'?raw.createdAt:new Date().toISOString(),updatedAt:typeof raw.updatedAt==='string'?raw.updatedAt:null,
+  };
+}
 function migrateAccountRecords(raw, transactions){
   const records=Array.isArray(raw.accountRecords) ? raw.accountRecords.map(normaliseAccountRecord).filter(Boolean) : [];
   const migratedFromLegacy=records.length===0;
@@ -944,13 +957,30 @@ function migrateAccountRecords(raw, transactions){
   });
   return records;
 }
+function isLegacyImportedAccount(name){return String(name||'').trim().toLowerCase()==='imported';}
+function preferredCurrentAccountNameFromRaw(raw,transactions){
+  const names=[];
+  const add=name=>{name=String(name||'').trim();if(name&&!isLegacyImportedAccount(name)&&!names.some(n=>n.toLowerCase()===name.toLowerCase()))names.push(name);};
+  (Array.isArray(raw.accountRecords)?raw.accountRecords:[]).filter(r=>r&&r.type==='current'&&!r.archived).forEach(r=>add(r.name));
+  if(isPlainObject(raw.accountStartingBalances))Object.keys(raw.accountStartingBalances).forEach(add);
+  (Array.isArray(raw.accounts)?raw.accounts:[]).forEach(add);transactions.forEach(t=>add(t.account));
+  return names.find(n=>n.toLowerCase()==='current account')||names[0]||'Current Account';
+}
+function migrateLegacyImportedAssignments(raw,transactions){
+  const count=transactions.filter(t=>isLegacyImportedAccount(t.account)).length;
+  if(!count)return {count:0,target:''};
+  const target=preferredCurrentAccountNameFromRaw(raw,transactions);
+  transactions.forEach(t=>{if(isLegacyImportedAccount(t.account)){t.account=target;delete t.accountId;}});
+  return {count,target};
+}
 function normaliseDB(raw){
   if(!isPlainObject(raw)) throw new Error('The backup does not contain a ledger object.');
   if(!Array.isArray(raw.transactions) || !Array.isArray(raw.categories)) throw new Error('Transactions or categories are missing.');
   const transactions=raw.transactions.map(normaliseTransaction);
   const invalidTransactions = transactions.filter(t=>!t).length;
   if(invalidTransactions) throw new Error(`${invalidTransactions} transaction${invalidTransactions===1?' is':'s are'} invalid.`);
-  const accountRecords=migrateAccountRecords(raw,transactions);
+  const importedMigration=migrateLegacyImportedAssignments(raw,transactions);
+  const accountRecords=migrateAccountRecords(raw,transactions).filter(r=>!isLegacyImportedAccount(r.name));
   const base = buildEmptyDB();
   const clean = Object.assign(base, {
     schemaVersion: SCHEMA_VERSION,
@@ -976,7 +1006,18 @@ function normaliseDB(raw){
     lastBackupAt: typeof raw.lastBackupAt==='string' ? raw.lastBackupAt : null,
     lastImport: isPlainObject(raw.lastImport) ? raw.lastImport : null,
     netWorthSnapshots:Array.isArray(raw.netWorthSnapshots) ? raw.netWorthSnapshots.filter(s=>isPlainObject(s)&&validISODate(s.date)&&Number.isFinite(Number(s.netWorth))).map(s=>Object.assign({},s,{netWorth:Number(s.netWorth),totalAssets:Number(s.totalAssets)||0,totalLiabilities:Number(s.totalLiabilities)||0})) : [],
+    investmentValuations:Array.isArray(raw.investmentValuations) ? raw.investmentValuations.map(v=>normaliseInvestmentValuation(v,accountRecords)).filter(Boolean) : [],
   });
+  if(importedMigration.count){
+    clean.recurringItems.forEach(item=>{if(isLegacyImportedAccount(item.account))item.account=importedMigration.target;});
+    clean.savingsGoals.forEach(goal=>{if(isLegacyImportedAccount(goal.account))goal.account=importedMigration.target;});
+    if(clean.lastImport&&isLegacyImportedAccount(clean.lastImport.account))clean.lastImport.account=importedMigration.target;
+    if(clean.reconciliations.Imported){
+      const existing=clean.reconciliations[importedMigration.target]||{history:[]};
+      existing.history=[...(existing.history||[]),...(clean.reconciliations.Imported.history||[])];clean.reconciliations[importedMigration.target]=existing;delete clean.reconciliations.Imported;
+    }
+    clean.lastAccountMigration={kind:'legacy-imported',count:importedMigration.count,target:importedMigration.target,migratedAt:new Date().toISOString()};
+  }
   clean.accounts=accountRecords.map(r=>r.name);
   clean.accountStartingBalances={};
   accountRecords.forEach(r=>{clean.accountStartingBalances[r.name]=r.openingBalance;});
@@ -1286,15 +1327,69 @@ function activeAccountNames(){
   DB.transactions.forEach(t=>{if(t.account&&!accountRecordFor(t.account)&&!active.includes(t.account))active.push(t.account);});
   return active.sort();
 }
+function preferredImportAccountName(){
+  const records=(DB.accountRecords||[]).filter(r=>!r.archived&&!isLegacyImportedAccount(r.name));
+  return (records.find(r=>r.name.toLowerCase()==='current account')||records.find(r=>r.type==='current')||records[0]||{}).name||'';
+}
 function ensureAccountRecord(name){
   name=String(name||'').trim();if(!name)return null;
   let record=accountRecordFor(name);
   if(!record){record=makeAccountRecord(name,inferAccountType(name),0);DB.accountRecords.push(record);syncLegacyAccounts();}
   return record;
 }
-function accountBalanceByName(account){
-  const list=DB.transactions.filter(t=>t.account===account&&transactionStatus(t)!=='pending');
+/* =========================================================
+   INVESTMENT VALUATIONS
+   Valuations are end-of-day account checkpoints. They are deliberately
+   separate from transactions: market movement changes net worth, but is not
+   income or spending. Transactions after the latest checkpoint remain live.
+   ========================================================= */
+function investmentAccountRecords(){
+  return (DB.accountRecords||[]).filter(r=>['investment','pension'].includes(r.type));
+}
+function investmentValuationsForAccount(accountId){
+  return (DB.investmentValuations||[]).filter(v=>v.accountId===accountId).sort((a,b)=>a.date.localeCompare(b.date)||(a.createdAt||'').localeCompare(b.createdAt||''));
+}
+function latestInvestmentValuation(accountId,asOfDate){
+  const limit=asOfDate||todayISO();
+  const rows=investmentValuationsForAccount(accountId).filter(v=>v.date<=limit);
+  return rows.length?rows[rows.length-1]:null;
+}
+function accountTransactionsTotal(account,fromExclusive,toInclusive){
+  return DB.transactions.reduce((sum,t)=>{
+    if(t.account!==account||transactionStatus(t)==='pending')return sum;
+    if(fromExclusive&&t.date<=fromExclusive)return sum;
+    if(toInclusive&&t.date>toInclusive)return sum;
+    return sum+Number(t.amount||0);
+  },0);
+}
+function accountTransferFlow(account,fromExclusive,toInclusive){
+  return DB.transactions.reduce((sum,t)=>{
+    if(t.account!==account||!t.transferId||transactionStatus(t)==='pending')return sum;
+    if(fromExclusive&&t.date<=fromExclusive)return sum;
+    if(toInclusive&&t.date>toInclusive)return sum;
+    return sum+Number(t.amount||0);
+  },0);
+}
+function accountBalanceByName(account,asOfDate){
+  const record=accountRecordFor(account),limit=asOfDate||todayISO();
+  if(record&&['investment','pension'].includes(record.type)){
+    const valuation=latestInvestmentValuation(record.id,limit);
+    if(valuation)return valuation.value+accountTransactionsTotal(account,valuation.date,limit);
+  }
+  const list=DB.transactions.filter(t=>t.account===account&&transactionStatus(t)!=='pending'&&(!asOfDate||t.date<=asOfDate));
   return accountOpeningBalance(account)+list.reduce((sum,t)=>sum+Number(t.amount||0),0);
+}
+function investmentValuationPerformance(valuation){
+  const rows=investmentValuationsForAccount(valuation.accountId),index=rows.findIndex(v=>v.id===valuation.id);
+  if(index<=0)return null;
+  const previous=rows[index-1],record=(DB.accountRecords||[]).find(r=>r.id===valuation.accountId);
+  if(!record)return null;
+  const netFlow=accountTransferFlow(record.name,previous.date,valuation.date);
+  const gain=valuation.value-previous.value-netFlow;
+  return {previous,netFlow,gain,rate:previous.value+Math.max(0,netFlow)>0?gain/(previous.value+Math.max(0,netFlow))*100:0};
+}
+function latestInvestmentPerformance(record){
+  const latest=latestInvestmentValuation(record.id);return latest?investmentValuationPerformance(latest):null;
 }
 function perAccountBalances(){
   const accounts = new Set((DB.accountRecords||[]).map(r=>r.name));
@@ -1667,6 +1762,9 @@ function renderTopbarActions(){
     document.getElementById('btn-add-recurring').onclick = ()=> openRecurringModal(null);
     document.getElementById('btn-add-wish').onclick = ()=> openWishModal(null);
     document.getElementById('btn-add-goal').onclick = ()=> openSavingsGoalModal(null);
+  } else if(UI.tab==='investments'){
+    host.innerHTML = `<button class="btn btn-primary" id="btn-update-investment-value">${iconPlus()} Update value</button>`;
+    document.getElementById('btn-update-investment-value').onclick = ()=>openInvestmentValuationModal(null);
   } else if(UI.tab==='networth'){
     host.innerHTML = `<button class="btn btn-primary" id="btn-save-networth">${iconPlus()} Save today\u2019s snapshot</button>`;
     document.getElementById('btn-save-networth').onclick = saveNetWorthSnapshot;
@@ -3609,7 +3707,16 @@ function planNumbers(){
 function investExpenseList(list){
   return expandSplits(list).filter(t=> t.amount<0 && countsTowardTotals(t) && DB.investmentCategories.includes(t.category));
 }
-function sumInvest(list){ return investExpenseList(list).reduce((s,t)=> s+Math.abs(t.amount), 0); }
+function investmentTransferContributionList(list){
+  const investmentTypes=new Set(['investment','pension']);
+  return list.filter(t=>{
+    if(!t.transferId||t.amount<=0)return false;
+    const destination=accountRecordFor(t.account);if(!destination||!investmentTypes.has(destination.type))return false;
+    return DB.transactions.some(pair=>pair.transferId===t.transferId&&pair.id!==t.id&&pair.amount<0&&!investmentTypes.has((accountRecordFor(pair.account)||{}).type));
+  }).map(t=>Object.assign({},t,{amount:-Math.abs(t.amount),category:'Investment transfer',contributionSource:'transfer'}));
+}
+function investmentContributionList(list){return [...investExpenseList(list),...investmentTransferContributionList(list)].sort((a,b)=>a.date.localeCompare(b.date));}
+function sumInvest(list){ return investmentContributionList(list).reduce((s,t)=> s+Math.abs(t.amount), 0); }
 function discretionaryExpenseList(list){
   return expandSplits(list).filter(t=> t.amount<0 && countsTowardTotals(t) && DB.discretionaryCategories.includes(t.category));
 }
@@ -3624,13 +3731,15 @@ function investmentHeadroom(range){
   const list = txInRange(range.from, range.to);
   const income = sumIncome(list);
   const expense = sumExpense(list);
-  const investAmt = sumInvest(list);
+  const categorisedInvestAmt=investExpenseList(list).reduce((s,t)=>s+Math.abs(t.amount),0);
+  const transferredInvestAmt=investmentTransferContributionList(list).reduce((s,t)=>s+Math.abs(t.amount),0);
+  const investAmt = categorisedInvestAmt+transferredInvestAmt;
   const discAmt = sumDiscretionary(list);
-  const essentialAmt = Math.max(0, expense - investAmt - discAmt);
+  const essentialAmt = Math.max(0, expense - categorisedInvestAmt - discAmt);
   const headroom = income - essentialAmt - investAmt;
   const trueSurplus = headroom - discAmt;
   const rate = income > 0 ? (investAmt / income * 100) : 0;
-  return { income, expense, investAmt, discAmt, essentialAmt, headroom, trueSurplus, rate, count: investExpenseList(list).length };
+  return { income, expense, investAmt,categorisedInvestAmt,transferredInvestAmt,discAmt,essentialAmt,headroom,trueSurplus,rate,count:investmentContributionList(list).length };
 }
 function investmentMonthlySeries(){
   return trendBuckets('month').map(b=>{
@@ -3651,20 +3760,79 @@ function investmentRecurring(){
     .sort((a,b)=> b.overdueDays - a.overdueDays);
 }
 function lastInvestmentTx(){
-  const all = DB.transactions
-    .filter(t=> t.amount<0 && countsTowardTotals(t) && DB.investmentCategories.includes(t.category))
-    .sort((a,b)=> b.date.localeCompare(a.date));
+  const all = investmentContributionList(DB.transactions).sort((a,b)=> b.date.localeCompare(a.date));
   return all.length ? all[0] : null;
 }
+function openInvestmentValuationModal(id,preferredAccountId){
+  const accounts=investmentAccountRecords().filter(r=>!r.archived);
+  if(!accounts.length){toast('Add an investment or pension account first','error');openAccountModal(null,'investment');return;}
+  const existing=id?(DB.investmentValuations||[]).find(v=>v.id===id):null;
+  const accountId=existing?existing.accountId:(preferredAccountId&&accounts.some(r=>r.id===preferredAccountId)?preferredAccountId:accounts[0].id);
+  const currentRecord=accounts.find(r=>r.id===accountId)||accounts[0];
+  const suggested=existing?existing.value:accountBalanceByName(currentRecord.name);
+  openModal(`<div class="modal-head"><h3>${existing?'Edit':'Update'} investment value</h3></div><div class="modal-body">
+    <div class="form-grid">
+      <div class="field span2"><label>Account</label><select id="valuation-account">${accounts.map(r=>`<option value="${r.id}" ${r.id===accountId?'selected':''}>${escHTML(r.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Valuation date</label><input id="valuation-date" type="date" max="${todayISO()}" value="${existing?existing.date:todayISO()}"></div>
+      <div class="field"><label>Total account value (£)</label><input id="valuation-value" type="number" min="0" step="0.01" value="${Number(suggested||0).toFixed(2)}"></div>
+      <div class="field span2"><label>Notes (optional)</label><textarea id="valuation-notes" placeholder="e.g. Trading 212 month-end value">${escHTML(existing?existing.notes:'')}</textarea></div>
+    </div>
+    <p style="font-size:11.5px;color:var(--ink-faint);margin:12px 0 0;">Enter the complete end-of-day account value shown by Trading 212, including invested holdings and uninvested cash. This updates net worth but never creates income or spending.</p>
+  </div><div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">Save value</button></div>`);
+  const accountEl=document.getElementById('valuation-account'),valueEl=document.getElementById('valuation-value');
+  if(!existing)accountEl.onchange=()=>{const r=accounts.find(x=>x.id===accountEl.value);if(r)valueEl.value=Number(accountBalanceByName(r.name)||0).toFixed(2);};
+  document.getElementById('m-cancel').onclick=closeModal;
+  document.getElementById('m-save').onclick=()=>{
+    const chosenId=accountEl.value,date=document.getElementById('valuation-date').value,value=Number(valueEl.value),notes=document.getElementById('valuation-notes').value.trim();
+    const record=accounts.find(r=>r.id===chosenId);
+    if(!record||!validISODate(date)||date>todayISO()||!Number.isFinite(value)||value<0){toast('Choose an account, valid date and non-negative value','error');return;}
+    const collision=(DB.investmentValuations||[]).find(v=>v.accountId===chosenId&&v.date===date&&v.id!==(existing&&existing.id));
+    if(existing){
+      if(collision){toast('That account already has a value for this date','error');return;}
+      Object.assign(existing,{accountId:chosenId,accountName:record.name,date,value,currency:record.currency||'GBP',notes,updatedAt:new Date().toISOString()});
+    }else if(collision){
+      Object.assign(collision,{value,notes,updatedAt:new Date().toISOString()});
+    }else{
+      DB.investmentValuations.push({id:uid('val'),accountId:chosenId,accountName:record.name,date,value,currency:record.currency||'GBP',source:'manual',notes,createdAt:new Date().toISOString(),updatedAt:null});
+    }
+    scheduleSave();closeModal();renderContent();renderSidebarBits();toast(existing||collision?'Investment value updated':'Investment value saved');
+  };
+}
+function confirmDeleteInvestmentValuation(id){
+  const valuation=(DB.investmentValuations||[]).find(v=>v.id===id);if(!valuation)return;
+  const record=(DB.accountRecords||[]).find(r=>r.id===valuation.accountId);
+  openModal(`<div class="modal-head"><h3>Delete this valuation?</h3></div><div class="modal-body"><p style="margin:0;color:var(--ink-soft);font-size:13px;">${escHTML(record?record.name:valuation.accountName)} · ${ukDate(valuation.date)} · ${gbp(valuation.value)}</p><p style="margin:10px 0 0;color:var(--ink-faint);font-size:11.5px;">Transactions and transfers are not affected. The account will fall back to its previous valuation or opening balance.</p></div><div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-danger" id="m-delete">Delete valuation</button></div>`);
+  document.getElementById('m-cancel').onclick=closeModal;document.getElementById('m-delete').onclick=()=>{DB.investmentValuations=DB.investmentValuations.filter(v=>v.id!==id);scheduleSave();closeModal();renderContent();renderSidebarBits();toast('Investment valuation deleted');};
+}
+function renderInvestmentValuationPanel(){
+  const accounts=investmentAccountRecords().filter(r=>!r.archived),valuations=(DB.investmentValuations||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
+  if(!accounts.length)return '';
+  return `<div class="panel" style="margin-bottom:16px;">
+    <div class="panel-head"><div class="panel-title">Portfolio values<small>Valuations change net worth; transfers explain money added or withdrawn</small></div></div>
+    ${accounts.map(record=>{
+      const latest=latestInvestmentValuation(record.id),balance=accountBalanceByName(record.name),performance=latest?investmentValuationPerformance(latest):null;
+      const age=latest?Math.max(0,daysBetween(latest.date,todayISO())):null,stale=age!=null&&age>35;
+      return `<div class="movers-row" style="align-items:center;">
+        <span class="movers-desc" style="white-space:normal;"><strong>${escHTML(record.name)}</strong><br><span style="font-size:10.5px;color:${stale?'var(--expense)':'var(--ink-faint)'};">${latest?`Last valued ${ukDate(latest.date)}${age?` · ${age}d ago`:''}${stale?' · update recommended':''}`:'No valuation yet · opening balance and transfers only'}</span>${performance?`<br><span style="font-size:10.5px;color:${performance.gain>=0?'var(--income)':'var(--expense)'};">Since previous value: ${gbp(performance.gain,{signed:true})} market movement · ${gbp(performance.netFlow,{signed:true})} net transfers</span>`:''}</span>
+        <span class="movers-amt num">${gbp(balance)}</span>
+        <button class="row-icon-btn" data-action="add-valuation" data-account-id="${record.id}" title="Update value">${iconPlus()}</button>
+      </div>`;
+    }).join('')}
+    ${valuations.length?`<div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px;"><div class="panel-title" style="font-size:12px;margin-bottom:6px;">Recent valuations</div>${valuations.slice(0,8).map(v=>{const r=(DB.accountRecords||[]).find(a=>a.id===v.accountId),p=investmentValuationPerformance(v);return `<div class="movers-row"><span class="movers-desc">${ukDate(v.date)} · ${escHTML(r?r.name:v.accountName)}${v.notes?`<br><span style="font-size:10.5px;color:var(--ink-faint);">${escHTML(v.notes)}</span>`:''}</span><span class="movers-amt num">${gbp(v.value)}${p?`<br><span style="font-size:10.5px;color:${p.gain>=0?'var(--income)':'var(--expense)'};">${gbp(p.gain,{signed:true})} movement</span>`:''}</span><button class="row-icon-btn" data-action="edit-valuation" data-id="${v.id}" title="Edit valuation">${iconEdit()}</button><button class="row-icon-btn" data-action="delete-valuation" data-id="${v.id}" title="Delete valuation">${iconTrash()}</button></div>`;}).join('')}</div>`:`<div class="empty-state" style="padding:22px 10px 8px;"><p>Add today’s total Trading 212 account value to establish the valuation cutover. Your older category history will remain untouched.</p></div>`}
+    ${valuations.length>=2?`<div class="chart-wrap" style="margin-top:14px;"><canvas id="investment-value-chart"></canvas></div>`:''}
+  </div>`;
+}
 function renderInvestments(c){
-  if(!DB.investmentCategories.length){
+  const hasInvestmentAccount=(DB.accountRecords||[]).some(r=>!r.archived&&['investment','pension'].includes(r.type));
+  if(!DB.investmentCategories.length&&!hasInvestmentAccount){
     c.innerHTML = `
       <div class="empty-state panel" style="padding:60px 20px;">
         ${iconInvest()}
-        <h4>No investment categories set yet</h4>
-        <p style="max-width:420px;margin-left:auto;margin-right:auto;">Flag a category — like "Savings/Investment" or a dedicated ISA/pension category — as <strong>Investment</strong> on the Categories tab, and this page will track your contributions and how much headroom you likely have.</p>
-        <button class="btn btn-primary" id="btn-goto-categories" style="margin-top:10px;">Go to Categories →</button>
+        <h4>No investment tracking set up yet</h4>
+        <p style="max-width:460px;margin-left:auto;margin-right:auto;">Add an investment or pension account and record money moved into it as a transfer. Pocket Ledger will count the contribution without treating it as spending. You can still flag a legacy expense category as <strong>Investment</strong>.</p>
+        <div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:10px;"><button class="btn btn-primary" id="btn-add-invest-account">Add investment account</button><button class="btn" id="btn-goto-categories">Use a category</button></div>
       </div>`;
+    document.getElementById('btn-add-invest-account').onclick = ()=>openAccountModal(null,'investment');
     document.getElementById('btn-goto-categories').onclick = ()=>{ document.querySelector('[data-tab="categories"]').click(); };
     return;
   }
@@ -3685,8 +3853,10 @@ function renderInvestments(c){
       <div class="page-sub" style="margin:0;">${range.label}</div>
     </div>
 
+    ${renderInvestmentValuationPanel()}
+
     <div class="kpi-row">
-      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Invested</div><div class="kpi-val income num">${gbp(h.investAmt)}</div><div class="kpi-sub">${h.count} contribution${h.count===1?'':'s'} this period</div></div>
+      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Invested</div><div class="kpi-val income num">${gbp(h.investAmt)}</div><div class="kpi-sub">${h.count} contribution${h.count===1?'':'s'}${h.transferredInvestAmt?` · ${gbp(h.transferredInvestAmt)} transferred`:''}</div></div>
       <div class="kpi-card balance"><div class="stripe"></div><div class="kpi-lbl">Contribution rate</div><div class="kpi-val num" style="color:var(--gold)">${h.rate.toFixed(1)}%</div><div class="kpi-sub">of income this period</div></div>
       <div class="kpi-card net"><div class="stripe"></div><div class="kpi-lbl">Comfortable headroom</div><div class="kpi-val num" style="color:${h.headroom>=0?'var(--brand)':'var(--expense)'}">${gbp(h.headroom)}</div><div class="kpi-sub">beyond essentials + current investing</div></div>
       <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Last contribution</div><div class="kpi-val num" style="font-size:16px;">${lastLabel}</div><div class="kpi-sub">${last ? escHTML(last.description) : ''}</div></div>
@@ -3709,13 +3879,14 @@ function renderInvestments(c){
         <div class="qc-line"><span>Income</span><span class="num">${gbp(h.income)}</span></div>
         <div class="qc-line"><span>− Essential &amp; committed spending</span><span class="num">−${gbp(h.essentialAmt)}</span></div>
         <div class="qc-line"><span>− Current investment contributions</span><span class="num">−${gbp(h.investAmt)}</span></div>
+        ${h.transferredInvestAmt?`<div class="qc-line" style="padding-left:12px;"><span>· recorded as account transfers</span><span class="num">${gbp(h.transferredInvestAmt)}</span></div>`:''}
         <div class="qc-line qc-total"><span>= Uncommitted headroom</span><span class="num" style="color:${h.headroom>=0?'var(--brand)':'var(--expense)'}">${gbp(h.headroom)}</span></div>
         <div class="qc-line" style="padding-left:12px;"><span>· already going to discretionary spending</span><span class="num">${gbp(h.discAmt)}</span></div>
         <div class="qc-line" style="padding-left:12px;"><span>· genuinely unallocated</span><span class="num" style="color:${h.trueSurplus>=0?'var(--income)':'var(--expense)'}">${gbp(h.trueSurplus)}</span></div>
         <p style="font-size:11px;color:var(--ink-faint);margin:12px 2px 0;">"Genuinely unallocated" is money that's neither essential, already invested, nor spent on discretionary things — the clearest room to put more toward investing, if you're comfortable with it.</p>
       </div>
       <div class="panel">
-        <div class="panel-head"><div class="panel-title">Recurring contributions<small>Detected from your transaction history</small></div></div>
+        <div class="panel-head"><div class="panel-title">Recurring category contributions<small>Detected from legacy categorised transaction history</small></div></div>
         <div id="invest-recurring-list"></div>
       </div>
     </div>
@@ -3726,10 +3897,13 @@ function renderInvestments(c){
     UI.investPeriod = b.dataset.p;
     renderInvestments(c);
   });
+  document.querySelectorAll('[data-action="add-valuation"]').forEach(b=>b.onclick=()=>openInvestmentValuationModal(null,b.dataset.accountId));
+  document.querySelectorAll('[data-action="edit-valuation"]').forEach(b=>b.onclick=()=>openInvestmentValuationModal(b.dataset.id));
+  document.querySelectorAll('[data-action="delete-valuation"]').forEach(b=>b.onclick=()=>confirmDeleteInvestmentValuation(b.dataset.id));
 
   const recHost = document.getElementById('invest-recurring-list');
   if(!recurring.length){
-    recHost.innerHTML = `<div class="empty-state" style="padding:24px 10px;"><h4>Nothing recurring detected yet</h4><p style="font-size:12.5px;">Once an investment category has at least two roughly-monthly transactions, they'll show up here.</p></div>`;
+    recHost.innerHTML = `<div class="empty-state" style="padding:24px 10px;"><h4>Nothing recurring detected yet</h4><p style="font-size:12.5px;">This detector uses legacy investment categories. Account transfers are already included in the totals above.</p></div>`;
   } else {
     recHost.innerHTML = recurring.map(r=> `
       <div class="movers-row">
@@ -3742,6 +3916,15 @@ function renderInvestments(c){
 
   drawInvestContribChart();
   drawInvestRateChart();
+  drawInvestmentValueChart();
+}
+function drawInvestmentValueChart(){
+  const ctx=document.getElementById('investment-value-chart');if(!ctx)return;
+  const accounts=investmentAccountRecords().filter(r=>investmentValuationsForAccount(r.id).length);
+  const palette=[cssVar('--brand'),cssVar('--income'),cssVar('--gold'),cssVar('--expense')];
+  const labels=[...new Set((DB.investmentValuations||[]).map(v=>v.date))].sort();
+  if(UI.charts.investValue)UI.charts.investValue.destroy();
+  UI.charts.investValue=new Chart(ctx,{type:'line',data:{labels:labels.map(ukDateShort),datasets:accounts.map((r,i)=>{const byDate=new Map(investmentValuationsForAccount(r.id).map(v=>[v.date,v.value]));return {label:r.name,data:labels.map(d=>byDate.has(d)?byDate.get(d):null),borderColor:palette[i%palette.length],backgroundColor:'transparent',tension:.2,borderWidth:2.5,pointRadius:3,spanGaps:true};})},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:accounts.length>1,labels:{color:chartTickColor()}},tooltip:{callbacks:{label:item=>` ${item.dataset.label}: ${gbp(item.parsed.y)}`}}},scales:{y:{ticks:{callback:v=>'£'+v.toLocaleString('en-GB'),font:{size:11},color:chartTickColor()},grid:{color:chartGridColor()}},x:{grid:{display:false},ticks:{font:{size:10.5},color:chartTickColor()}}}}});
 }
 function iconInvest(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" width="40" height="40"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>`; }
 // Generic single-source, multi-target Sankey ribbon path — a smooth curve
@@ -5091,7 +5274,7 @@ function newImportState(){
     parsed: [],
     rememberRules: true,
     learnedRules: [],
-    destinationAccount: activeAccountNames()[0] || 'Imported',
+    destinationAccount: preferredImportAccountName(),
   };
 }
 
@@ -5124,6 +5307,8 @@ function renderWizardStep(){
 
 function renderImportStep1(body){
   const li = DB.lastImport;
+  const importAccounts=activeAccountNames().filter(name=>!isLegacyImportedAccount(name));
+  if(!importAccounts.includes(UI.importState.destinationAccount))UI.importState.destinationAccount=preferredImportAccountName();
   const lastImportNote = li ? `
     <div class="last-import-note" style="background:var(--surface-2); border:1px solid var(--line); border-radius:var(--radius); padding:12px 14px; margin-bottom:16px; font-size:12.5px; color:var(--ink-soft); line-height:1.6;">
       <strong style="color:var(--ink);">Last import:</strong> ${timeAgoLabel(li.timestamp)} — ${li.count} transaction${li.count===1?'':'s'} from "${escHTML(li.fileName)}"
@@ -5146,9 +5331,8 @@ function renderImportStep1(body){
       </div>
       <div class="field" style="margin-top:12px; max-width:320px;">
         <label>Import into account</label>
-        <input type="text" id="import-account" list="import-account-list" value="${escAttr(UI.importState.destinationAccount)}" placeholder="e.g. Current Account">
-        <datalist id="import-account-list">${activeAccountNames().map(a=>`<option value="${escAttr(a)}">`).join('')}</datalist>
-        <span style="font-size:11px;color:var(--ink-faint);">Every transaction in this statement will be assigned to this account.</span>
+        ${importAccounts.length?`<select id="import-account">${importAccounts.map(a=>`<option value="${escAttr(a)}" ${a===UI.importState.destinationAccount?'selected':''}>${escHTML(a)}</option>`).join('')}</select>`:`<div style="padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--gold-wash);color:var(--gold);font-size:12px;">Add a real account before importing. Pocket Ledger will no longer create a generic Imported account.</div><button class="btn btn-sm" id="import-add-account" style="margin-top:8px;">${iconPlus()} Add account</button>`}
+        <span style="font-size:11px;color:var(--ink-faint);">Every transaction in this statement will be assigned to this account. Add and rename accounts under Settings.</span>
       </div>
     </div>
   `;
@@ -5165,7 +5349,9 @@ function renderImportStep1(body){
   document.getElementById('has-header').addEventListener('change', e=>{
     UI.importState.hasHeader = e.target.value==='yes';
   });
-  document.getElementById('import-account').addEventListener('input', e=>{ UI.importState.destinationAccount=e.target.value; });
+  const importAccount=document.getElementById('import-account');
+  if(importAccount)importAccount.addEventListener('change', e=>{ UI.importState.destinationAccount=e.target.value; });
+  const addAccount=document.getElementById('import-add-account');if(addAccount)addAccount.onclick=()=>openAccountModal(null);
 }
 function iconUpload(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`; }
 
@@ -5479,7 +5665,8 @@ function confirmImport(){
   const st = UI.importState;
   const destinationAccount = String(st.destinationAccount||'').trim();
   if(!destinationAccount){ toast('Choose an account for this import', 'error'); return; }
-  ensureAccountRecord(destinationAccount);
+  const destinationRecord=accountRecordFor(destinationAccount);
+  if(!destinationRecord||destinationRecord.archived||isLegacyImportedAccount(destinationAccount)){toast('Choose an active account from Settings before importing','error');return;}
   const toImport = st.parsed.filter(p=>p.include && p.date);
   if(!toImport.length){ toast('No rows selected to import', 'error'); return; }
   const learnedRules = [];
@@ -5580,9 +5767,34 @@ function syncLegacyAccounts(){
   DB.transactions.forEach(t=>{const r=accountRecordFor(t.account);if(r)t.accountId=r.id;});
   DB.startingBalance=DB.accountRecords.length?(Number(DB.accountRecords[0].openingBalance)||0):0;
 }
-function openAccountModal(id){
+function legacyMovementCounts(){
+  const rows=expandSplits(DB.transactions||[]);
+  return {
+    savingsOut:rows.filter(t=>t.amount<0&&t.category==='Savings'&&!t.transferId).length,
+    savingsIn:rows.filter(t=>t.amount>0&&t.category==='Savings Withdrawal'&&!t.transferId).length,
+    investmentOut:rows.filter(t=>t.amount<0&&t.category==='Investment Out'&&!t.transferId).length,
+    investmentIn:rows.filter(t=>t.amount>0&&t.category==='Investment In'&&!t.transferId).length
+  };
+}
+function openAccountSetupGuide(){
+  const counts=legacyMovementCounts();
+  const total=counts.savingsOut+counts.savingsIn+counts.investmentOut+counts.investmentIn;
+  openModal(`<div class="modal-head"><h3>Set up accounts without double-counting</h3></div><div class="modal-body">
+    <div style="display:flex;flex-direction:column;gap:14px;color:var(--ink-soft);font-size:12.5px;line-height:1.55;">
+      <div><strong style="color:var(--ink);">1. Keep Current Account as your statement destination.</strong><br>New imports must use a real account. The old synthetic “Imported” destination is no longer available.</div>
+      <div><strong style="color:var(--ink);">2. Add Savings with its actual balance today.</strong><br>From that cutover date onward, convert the current-account side of each savings movement into a transfer to or from Savings. Use Savings Goals only to earmark part of that balance; goal funding is not another bank transaction.</div>
+      <div><strong style="color:var(--ink);">3. Add your provider as an Investment account with its actual value today.</strong><br>Record future deposits and withdrawals as transfers. Deposits will appear as contributions on Investments, while transfers remain excluded from spending.</div>
+      ${total?`<div style="padding:10px 12px;background:var(--brand-wash);border-radius:8px;"><strong style="color:var(--ink);">Your existing history is preserved.</strong><br>${total} older entries still use movement categories: ${counts.savingsOut} savings deposit${counts.savingsOut===1?'':'s'}, ${counts.savingsIn} savings withdrawal${counts.savingsIn===1?'':'s'}, ${counts.investmentOut} investment deposit${counts.investmentOut===1?'':'s'} and ${counts.investmentIn} investment withdrawal${counts.investmentIn===1?'':'s'}. Do not also recreate those as transfers after entering today’s real account balances, or they will be counted twice.</div>`:''}
+      <div><strong style="color:var(--ink);">When an imported statement line is a transfer:</strong><br>Open that transaction and convert it to a transfer instead of adding a second transaction manually. Pocket Ledger creates the matching side for you.</div>
+    </div>
+  </div><div class="modal-foot"><button class="btn" id="m-close-guide">Close</button><button class="btn" id="m-add-savings">Add Savings</button><button class="btn btn-primary" id="m-add-investment">Add Investment</button></div>`,{wide:true});
+  document.getElementById('m-close-guide').onclick=closeModal;
+  document.getElementById('m-add-savings').onclick=()=>openAccountModal(null,'savings');
+  document.getElementById('m-add-investment').onclick=()=>openAccountModal(null,'investment');
+}
+function openAccountModal(id,preferredType){
   const record=id?(DB.accountRecords||[]).find(r=>r.id===id):null;
-  const initialType=record?record.type:'current';
+  const initialType=record?record.type:(preferredType||'current');
   const displayedOpening=record?(isLiabilityType(record.type)?Math.abs(Number(record.openingBalance)||0):Number(record.openingBalance)||0):0;
   openModal(`<div class="modal-head"><h3>${record?'Edit':'Add'} account</h3></div><div class="modal-body"><div class="form-grid">
     <div class="field span2"><label>Account name</label><input type="text" id="acct-name" value="${record?escAttr(record.name):''}" placeholder="e.g. Santander current account"></div>
@@ -5597,7 +5809,7 @@ function openAccountModal(id){
   function updateTypeFields(){
     const liability=isLiabilityType(typeEl.value);
     document.getElementById('acct-opening-label').textContent=liability?'Opening amount owed (£)':'Opening balance (£)';
-    document.getElementById('acct-opening-help').textContent=liability?'Enter the positive amount owed; Pocket Ledger stores it as a liability.':'Enter the account value at the start of your transaction history.';
+    document.getElementById('acct-opening-help').textContent=liability?'Enter the positive amount owed; Pocket Ledger stores it as a liability.':['investment','pension'].includes(typeEl.value)?'For a clean cutover, enter the total value shown by your provider today. Later valuations supersede it.':'Enter the account value at the start of your transaction history.';
     document.getElementById('acct-limit-wrap').style.display=typeEl.value==='credit_card'?'':'none';
   }
   typeEl.onchange=updateTypeFields;updateTypeFields();
@@ -5609,6 +5821,7 @@ function openAccountModal(id){
     if(!name){toast('Enter an account name','error');return;}
     if((DB.accountRecords||[]).some(r=>r.id!==(record&&record.id)&&r.name.toLowerCase()===name.toLowerCase())){toast('That account name already exists','error');return;}
     if(!Number.isFinite(rawOpening)||rawOpening<0){toast('Enter a valid opening amount','error');return;}
+    if(record&&['investment','pension'].includes(record.type)&&!['investment','pension'].includes(type)&&(DB.investmentValuations||[]).some(v=>v.accountId===record.id)){toast('Delete this account’s valuations before changing it to a non-investment type','error');return;}
     if(record){
       const oldName=record.name;
       Object.assign(record,{name,type,institution,openingBalance,openingBalanceDate,creditLimit,includeInNetWorth:document.getElementById('acct-networth').checked});
@@ -5616,6 +5829,7 @@ function openAccountModal(id){
         DB.transactions.forEach(t=>{if(t.account===oldName)t.account=name;});
         (DB.recurringItems||[]).forEach(item=>{if(item.account===oldName)item.account=name;});
         (DB.savingsGoals||[]).forEach(goal=>{if(goal.account===oldName)goal.account=name;});
+        (DB.investmentValuations||[]).forEach(v=>{if(v.accountId===record.id)v.accountName=name;});
         if(DB.reconciliations[oldName]){DB.reconciliations[name]=DB.reconciliations[oldName];delete DB.reconciliations[oldName];}
         if(UI.reconcileAccount===oldName)UI.reconcileAccount=name;
       }
@@ -5708,7 +5922,7 @@ function openSettingsModal(){
       <div style="border-top:1px solid var(--line); padding-top:14px; margin-bottom:14px;">
         <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Accounts</div>
         <div style="font-size:11.5px;color:var(--ink-faint);margin-bottom:10px;">Account types determine whether a balance is treated as an asset or liability. Archiving hides an account from new entries without deleting its history.</div>
-        <button class="btn btn-sm" id="add-account-btn">${iconPlus()} Add account</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-sm" id="add-account-btn">${iconPlus()} Add account</button><button class="btn btn-sm" id="account-guide-btn">Account setup guide</button></div>
         <div id="account-manager-body"></div>
       </div>
       <div style="border-top:1px solid var(--line); padding-top:14px; margin-bottom:14px;">
@@ -5740,6 +5954,7 @@ function openSettingsModal(){
     renderContent();
   });
   document.getElementById('add-account-btn').onclick = ()=>openAccountModal(null);
+  document.getElementById('account-guide-btn').onclick = openAccountSetupGuide;
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('s-load-sample').onclick = ()=>{
     DB = buildSeedDB(); scheduleSave(); closeModal(); renderContent(); toast('Sample data loaded');
@@ -5924,11 +6139,16 @@ async function init(){
   if(!DB.investmentCategories) DB.investmentCategories = [];
   if(!DB.pendingCards) DB.pendingCards = [];
   if(!DB.netWorthSnapshots) DB.netWorthSnapshots = [];
+  if(!DB.investmentValuations) DB.investmentValuations = [];
   if(DB.lastImport === undefined) DB.lastImport = null;
   if(!loaded || (loaded.schemaVersion||1)!==SCHEMA_VERSION) scheduleSave();
 
   if(!IN_CLAUDE&&BROWSER_STORAGE&&BROWSER_STORAGE.status().migrated){
     setTimeout(()=>toast('Existing data moved to IndexedDB and verified; the original recovery copy was kept','success',{duration:5000}),80);
+  }
+  if(DB.lastAccountMigration&&DB.lastAccountMigration.kind==='legacy-imported'){
+    const migration=DB.lastAccountMigration;
+    setTimeout(()=>toast(`Moved ${migration.count} imported transaction${migration.count===1?'':'s'} into ${migration.target}`,'success',{duration:6500}),140);
   }
 
   if(isLockEnabled()){

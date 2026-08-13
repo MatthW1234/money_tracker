@@ -1,5 +1,60 @@
 # Pocket Ledger
 
+## Version 1.09
+
+Investment and pension accounts now support dated valuation checkpoints. Use
+**Investments → Update value** to enter the complete end-of-day account value
+shown by Trading 212, including both holdings and uninvested cash. Valuations
+are stored separately from transactions: they update account value and net
+worth but never appear as income or spending.
+
+The most recent valuation is authoritative for that date. Transfers and other
+account entries dated after it are then applied normally, so a new contribution
+or withdrawal updates the tracked value immediately. Between two valuations,
+Pocket Ledger estimates market movement as:
+
+`ending value − starting value − net transfers`
+
+For example, £1,000 followed by a £100 contribution and a later value of £1,150
+is reported as £50 market movement. The Investments screen shows recent values,
+net transfers, estimated movement, staleness and a per-account value chart.
+
+For the supplied ledger, create a Trading 212 investment account using the
+actual current value as its opening cutover, then save the same day's valuation
+after all activity is complete. Future bank-side Trading 212 movements should
+be converted into transfers. The 101 older savings/investment category records
+remain untouched and should not be recreated as transfers.
+
+Version 1.09 is deliberately manual and local: it stores no Trading 212 API
+credentials. CSV/statement import and a securely mediated read-only API sync
+remain possible later milestones.
+
+## Version 1.08
+
+The import wizard now accepts only an active account from the account manager.
+Older data assigned to the synthetic `Imported` destination is automatically
+moved into `Current Account`, including related import and reconciliation
+metadata. In the supplied backup this corrects four transactions, resulting in
+all 1,116 transactions being assigned to the real current account.
+
+Settings now includes an account setup guide for moving from the existing
+category-based history to proper Current, Savings and Investment accounts. The
+recommended safe cutover is to enter today's real balance when adding Savings
+or Investment, preserve the older one-sided category records, and convert only
+future statement movements into transfers. This avoids recreating historical
+money and double-counting it.
+
+Transfers into investment or pension accounts now appear as contributions on
+the Investments screen. They remain excluded from spending and income, so a
+Current-to-Investment movement changes the account split and contribution
+figures without changing net worth. Savings Goals continue to earmark money
+already held in an account; funding a goal is not a second bank movement.
+
+The supplied backup contains 101 older movements stored as categories: 12
+savings deposits, 40 savings withdrawals, 47 investment deposits and two
+investment withdrawals. Version 1.08 deliberately preserves them rather than
+guessing at historical counterpart accounts or balances.
+
 ## Version 1.07
 
 Installed browser/PWA copies now store the ledger in IndexedDB. On first use,

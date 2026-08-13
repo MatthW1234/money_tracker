@@ -1,5 +1,67 @@
 # Pocket Ledger changelog
 
+## 1.09 — investment valuation checkpoints
+
+### Added
+
+- Dated, per-account valuation records for investment and pension accounts.
+- An **Update value** workflow on Investments for entering the complete
+  end-of-day value shown by Trading 212, including holdings and uninvested cash.
+- Recent valuation history with edit and delete controls, stale-value warnings,
+  and a per-account valuation chart.
+- Market-movement estimates between valuations, calculated as ending value
+  minus starting value minus net account transfers.
+
+### Accounting behaviour
+
+- A valuation is an authoritative account checkpoint, not a transaction. It
+  changes the account's current value and net worth without creating income or
+  spending.
+- Transactions after the latest valuation continue to update the account, so a
+  later contribution or withdrawal appears immediately without waiting for the
+  next valuation.
+- Investment transfers continue to count as contributions and remain excluded
+  from spending. Dividends, fees and market movement can therefore be reflected
+  in the next total valuation without inventing adjustment transactions.
+
+### Compatibility and verification
+
+- Version 1.08 backups migrate with an empty valuation history and no changes to
+  transactions, rules, accounts or historical net-worth snapshots.
+- The supplied backup still retains 1,116 transactions, 141 rules and all 101
+  legacy savings/investment category movements.
+- Automated checks cover valuation backup round-trips, net flows between two
+  valuations, post-valuation transfers, net-worth balance precedence, and all
+  application sections.
+
+## 1.08 — real account imports and clearer transfers
+
+### Corrected
+
+- Restoring older data automatically moves transactions assigned to the
+  synthetic `Imported` account into the existing `Current Account` and removes
+  the phantom account.
+- The import wizard now requires an active real destination account and uses an
+  account selector. It can no longer create or reuse `Imported` implicitly.
+- The supplied backup migrates its four `Imported` transactions safely, leaving
+  all 1,116 transactions in `Current Account` and preserving all rules.
+
+### Added
+
+- An account setup guide in Settings explains a safe cutover for current,
+  savings and investment accounts without duplicating historical movements.
+- Investment and pension account transfers now count as contributions on the
+  Investments screen while remaining excluded from income and spending.
+- The Investments setup state can create an investment account directly.
+
+### Data protection
+
+- The backup's 101 older savings and investment movements remain as their
+  existing categories. They are reported in the setup guide rather than being
+  silently rewritten into two-sided transfers.
+- Imported account references in recurring items, goals, the last-import record
+  and reconciliation history follow the same migration.
+
 ## 1.07 — verified IndexedDB migration
 
 ### Added
