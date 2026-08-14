@@ -187,6 +187,35 @@
         createdAt:typeof raw.createdAt==='string'?raw.createdAt:new Date().toISOString(),updatedAt:typeof raw.updatedAt==='string'?raw.updatedAt:null,
       };
     }
+    function normaliseReconciliations(raw,transactions){
+      if(!isPlainObject(raw))return {};
+      const result={};
+      Object.entries(raw).forEach(([account,value])=>{
+        if(!isPlainObject(value)||!Array.isArray(value.history))return;
+        const history=value.history.map(entry=>{
+          if(!isPlainObject(entry)||!validISODate(entry.statementDate)||!Number.isFinite(Number(entry.statementBalance)))return null;
+          const id=typeof entry.id==='string'&&entry.id?entry.id:uid('rec');
+          const transactionIds=Array.isArray(entry.transactionIds)?entry.transactionIds.filter(value=>typeof value==='string'):(transactions||[]).filter(transaction=>transaction.reconciliationId===id).map(transaction=>transaction.id);
+          const snapshots=Array.isArray(entry.transactionSnapshots)?entry.transactionSnapshots.filter(snapshot=>isPlainObject(snapshot)&&typeof snapshot.id==='string').map(snapshot=>({
+            id:snapshot.id,date:validISODate(snapshot.date)?snapshot.date:'',description:typeof snapshot.description==='string'?snapshot.description:'',
+            amount:finiteNumber(Number(snapshot.amount),0),category:typeof snapshot.category==='string'?snapshot.category:'',account:typeof snapshot.account==='string'?snapshot.account:account,
+            status:['pending','cleared','reconciled'].includes(snapshot.status)?snapshot.status:'reconciled',transferId:typeof snapshot.transferId==='string'?snapshot.transferId:null,
+            excluded:!!snapshot.excluded,isAdjustment:!!snapshot.isAdjustment,
+          })):[];
+          return Object.assign({},entry,{
+            id,statementDate:entry.statementDate,statementStartDate:validISODate(entry.statementStartDate)?entry.statementStartDate:'',statementBalance:Number(entry.statementBalance),
+            openingBalance:entry.openingBalance==null?null:finiteNumber(Number(entry.openingBalance),null),calculatedBalance:entry.calculatedBalance==null?null:finiteNumber(Number(entry.calculatedBalance),null),
+            inflows:entry.inflows==null?null:finiteNumber(Number(entry.inflows),null),outflows:entry.outflows==null?null:finiteNumber(Number(entry.outflows),null),
+            differenceAtCompletion:entry.differenceAtCompletion==null?0:finiteNumber(Number(entry.differenceAtCompletion),0),
+            completedAt:typeof entry.completedAt==='string'?entry.completedAt:new Date().toISOString(),transactionCount:Math.max(0,Math.round(Number(entry.transactionCount)||transactionIds.length)),
+            transactionIds,transactionSnapshots:snapshots,balanceAdjustmentIds:Array.isArray(entry.balanceAdjustmentIds)?entry.balanceAdjustmentIds.filter(value=>typeof value==='string'):[],
+            diagnosticWarnings:Array.isArray(entry.diagnosticWarnings)?entry.diagnosticWarnings.filter(value=>typeof value==='string'):[],auditVersion:entry.auditVersion===1||snapshots.length?1:0,
+          });
+        }).filter(Boolean);
+        result[account]=Object.assign({},value,{history});
+      });
+      return result;
+    }
     function migrateAccountRecords(raw,transactions){
       const records=Array.isArray(raw.accountRecords)?raw.accountRecords.map(normaliseAccountRecord).filter(Boolean):[];
       const migratedFromLegacy=records.length===0,names=new Set();
@@ -236,7 +265,7 @@
         merchantAliases:isPlainObject(raw.merchantAliases)?raw.merchantAliases:{},accounts:Array.isArray(raw.accounts)?raw.accounts.filter(x=>typeof x==='string'):[],
         accountRecords,discretionaryCategories:Array.isArray(raw.discretionaryCategories)?raw.discretionaryCategories.filter(x=>typeof x==='string'):[],
         investmentCategories:Array.isArray(raw.investmentCategories)?raw.investmentCategories.filter(x=>typeof x==='string'):[],
-        pendingCards:Array.isArray(raw.pendingCards)?raw.pendingCards.filter(isPlainObject):[],reconciliations:isPlainObject(raw.reconciliations)?raw.reconciliations:{},
+        pendingCards:Array.isArray(raw.pendingCards)?raw.pendingCards.filter(isPlainObject):[],reconciliations:normaliseReconciliations(raw.reconciliations,transactions),
         lastBackupAt:typeof raw.lastBackupAt==='string'?raw.lastBackupAt:null,lastImport:isPlainObject(raw.lastImport)?raw.lastImport:null,
         netWorthSnapshots:Array.isArray(raw.netWorthSnapshots)?raw.netWorthSnapshots.filter(s=>isPlainObject(s)&&validISODate(s.date)&&Number.isFinite(Number(s.netWorth))).map(s=>Object.assign({},s,{netWorth:Number(s.netWorth),totalAssets:Number(s.totalAssets)||0,totalLiabilities:Number(s.totalLiabilities)||0})):[],
         investmentValuations:Array.isArray(raw.investmentValuations)?raw.investmentValuations.map(v=>normaliseInvestmentValuation(v,accountRecords)).filter(Boolean):[],
@@ -265,7 +294,7 @@
       transactionStatus,countsTowardTotals,categoryRowsFor,expandSplits,sumIncome,sumExpense,accountRecordFor,
       allAccountNames,activeAccountNames,isLegacyImportedAccount,preferredImportAccountName,syncLegacyAccounts,
       ensureAccountRecord,accountOpeningBalance,accountTransactionsTo,clearedAccountBalance,reconciliationHistory,currentBalance,
-      normaliseTransaction,normaliseAccountRecord,normaliseRecurringItem,normaliseSavingsGoal,normaliseInvestmentValuation,
+      normaliseTransaction,normaliseAccountRecord,normaliseRecurringItem,normaliseSavingsGoal,normaliseInvestmentValuation,normaliseReconciliations,
       migrateAccountRecords,preferredCurrentAccountNameFromRaw,migrateLegacyImportedAssignments,normaliseDB,
     };
   }

@@ -1,5 +1,123 @@
 # Pocket Ledger changelog
 
+## 1.22 — audit-quality reconciliation history
+
+- Advanced the ledger schema from 10 to 11 with automatic normalisation of
+  existing reconciliation history.
+- New reconciliations retain statement start/end dates, opening and closing
+  anchors, calculated balance, period inflows/outflows, completion difference,
+  included transaction IDs and immutable field snapshots, balance-adjustment
+  IDs and acknowledged diagnostic warning codes.
+- Added audit-history inspection with explicit legacy/audited labels.
+- Data Health now detects missing, edited or newly backdated records relative
+  to the latest reconciliation snapshot, including offsetting changes that do
+  not alter the closing balance.
+- Reopening reports snapshot damage before unlocking currently linked entries
+  and restores the original statement inputs for correction.
+- Schema-10 backups retain their existing anchors and migrate as legacy audit
+  records; transaction, rule and account data remain compatible.
+
+## 1.21 — guided reconciliation
+
+- Replaced the single statement panel with Statement, Opening anchor, Match
+  entries, Explain difference and Complete stages.
+- Added `js/reconciliation.js` for statement-session calculations, previous
+  reconciliation lookup and suggested period starts.
+- Shows the previous agreed balance or account opening balance before entry
+  matching, alongside period inflows, outflows and pending counts.
+- Keeps discrepancy suggestions and Data Health accessible in the dedicated
+  explanation stage, with balance adjustment presented as a last resort.
+- Retained schema 10 and the existing reconciliation record shape for a clean
+  rollback checkpoint before v1.22.
+
+## 1.20 — simplified money movement
+
+- Replaced accounting-oriented transaction choices with Spent, Received and
+  Moved between accounts.
+- Restricted transaction, bulk assignment and transfer destinations to
+  accounts configured in Account Management.
+- Added separate sent and received transfer amounts with an immediate transfer
+  cost preview and consistent paired-entry creation in `js/transfers.js`.
+- Added matching suggestions when converting imported rows, allowing an
+  existing opposite entry on another account within three days to be linked.
+- Preserved income/spending exclusion for transfers and Trading 212
+  contribution/fee calculations.
+- Retained schema 10 and backup compatibility.
+
+## 1.19 — read-only data health and reconciliation diagnostics
+
+- Added `js/diagnostics.js`, a mutation-free audit engine for account,
+  transaction, transfer, reconciliation, rule and investment-value integrity.
+- Added a Data Health navigation screen with severity summaries and direct
+  routes to relevant transactions and workflows.
+- Detects incomplete or over-linked transfers, same-account legs, invalid
+  directions, fee mismatches and partially reconciled transfer pairs.
+- Detects missing/unknown account assignments, possible exact duplicate
+  groups, uncategorised spending, balance adjustments, orphaned reconciliation
+  locks, historical reconciliation drift, missing rule categories, conflicting
+  rules and stale or missing investment valuations.
+- Added exact difference suggestions to statement reconciliation using up to
+  three pending, recently cleared or near-boundary transactions.
+- Retained schema 10, backup compatibility and all existing transaction/rule
+  behaviour; diagnostics never mutate the ledger.
+
+## 1.18 — modular UI completion
+
+- Reduced `index.html` from the application monolith to a compact document
+  shell containing markup and ordered asset loading.
+- Moved all styling into `css/app.css` and shared controller/orchestration code
+  into `js/app.js`, with startup isolated in `js/start.js`.
+- Isolated device-specific theme/PIN behaviour in `js/device.js` and recurring
+  transaction detection in `js/recurring.js`.
+- Extracted complete Dashboard, Reconciliation, Transactions, Planning,
+  Investments, Insights, Categories, Import and Settings view modules.
+- Retained the existing Net Worth and account-management modules and all
+  previously extracted business-logic modules.
+- Added every modular asset to the offline PWA cache and advanced its cache
+  namespace.
+- Retained schema 10, backup compatibility, transaction/rule data, financial
+  calculations and existing interactions without migration.
+- Added an assembled-shell regression that starts the app and renders every
+  primary navigation screen against the same runtime.
+
+## 1.17 — account-management extraction
+
+- Moved the Settings account list, account-type option rendering and
+  archive/restore interaction into `js/views/accounts.js`.
+- Kept account balances, transaction ownership, migrations and legacy account
+  compatibility in the core ledger model.
+- Added the account view module to the offline PWA cache.
+- Retained schema 10, JSON backup compatibility and all financial/rule
+  behaviour.
+
+## 1.16 — Net Worth screen extraction
+
+- Moved the complete Net Worth view, account-row presentation, snapshot action
+  and chart wiring into `js/views/net-worth.js`.
+- Kept account balances in the investment/core models and totals in the report
+  model; the view receives them as explicit dependencies.
+- Retained schema 10, existing snapshots, PWA behaviour and backup compatibility.
+
+## 1.15 — shared UI foundation
+
+- Extracted currency and UK-date formatting, relative timestamps, month labels,
+  HTML/attribute escaping and status-pill presentation into `js/ui.js`.
+- Kept screen rendering, CSS and interaction wiring unchanged while establishing
+  the common UI dependency required for later per-screen modules.
+- Retained schema 10, backup compatibility, desktop PWA metadata and all
+  financial/rule behaviour.
+- Added escaping, formatting, status and full-shell integration fixtures.
+
+## 1.14 — reporting model extraction
+
+- Moved budget pace, pending-card totals, savings opportunities, goal funding,
+  spending momentum, weekday spending, savings-rate trends, largest
+  transactions and net-worth summaries into `js/reports.js`.
+- Kept report rendering and charts in `index.html`, preserving the current UI.
+- Retained schema 10, backup compatibility and the unchanged rules engine.
+- Added reporting fixtures for pending exclusion, transfers, split spending,
+  goal funding, rolling windows and asset/liability totals.
+
 ## 1.13 — CSV import engine extraction
 
 ### Changed

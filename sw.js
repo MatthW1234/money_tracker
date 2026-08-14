@@ -7,16 +7,38 @@
 // first for speed and only re-checked in the background.
 // Your data itself is not cached here — that's handled by the app's own storage.
 
-const CACHE = 'pocket-ledger-v16';
+const CACHE = 'pocket-ledger-v25';
 const APP_SHELL = ['./', './index.html', './manifest.json', './icon.svg'];
 const VENDOR = [
   './vendor/chart.umd.min.js',
   './vendor/papaparse.min.js',
+  './css/app.css',
   './js/rules.js',
   './js/storage.js',
   './js/model.js',
   './js/investments.js',
   './js/import.js',
+  './js/reports.js',
+  './js/ui.js',
+  './js/diagnostics.js',
+  './js/transfers.js',
+  './js/reconciliation.js',
+  './js/app.js',
+  './js/device.js',
+  './js/recurring.js',
+  './js/views/net-worth.js',
+  './js/views/accounts.js',
+  './js/views/dashboard.js',
+  './js/views/reconcile.js',
+  './js/views/health.js',
+  './js/views/transactions.js',
+  './js/views/plan.js',
+  './js/views/investments.js',
+  './js/views/insights.js',
+  './js/views/categories.js',
+  './js/views/import.js',
+  './js/views/settings.js',
+  './js/start.js',
 ];
 
 self.addEventListener('install', (event) => {

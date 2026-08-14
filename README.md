@@ -1,5 +1,119 @@
 # Pocket Ledger
 
+## Version 1.22
+
+Completed reconciliations now retain an audit snapshot: statement period,
+opening anchor, closing balance, calculated balance, inflows, outflows,
+included transaction IDs and values, balance adjustments, and acknowledged
+diagnostic warnings. History entries can be inspected from Reconciliation.
+
+Data Health compares the latest snapshot with the current ledger and reports
+missing, changed or newly backdated entries even when offsetting edits leave the
+headline balance unchanged. Reopening a reconciliation discloses these changes
+and restores its statement inputs, while warning that deleted records cannot be
+recovered.
+
+This advances the ledger to schema version 11. Schema-10 backups migrate on
+load: existing balance/date anchors are preserved and marked as legacy because
+their original transaction values were never captured.
+
+## Version 1.21
+
+Reconciliation is now a guided five-stage workspace: Statement, Opening
+anchor, Match entries, Explain difference and Complete. The workflow suggests
+the day after the previous reconciliation as the next statement start, shows
+period inflows/outflows and pending counts, and separates transaction matching
+from discrepancy diagnosis.
+
+The underlying schema and transaction-status behaviour are unchanged in this
+checkpoint. It can therefore be rolled back independently before the durable
+audit snapshot migration introduced in v1.22.
+
+## Version 1.20
+
+Adding money now begins with three plain-language choices: **Spent**,
+**Received** or **Moved between accounts**. Account fields use the accounts
+already configured in Account Management, preventing accidental synthetic
+destinations from being created by a typo.
+
+Transfers accept the amount sent and the amount actually received. Any
+difference is recorded as a transfer cost, allowing a £100.70 bank debit to
+become a £100.00 Trading 212 contribution with a £0.70 cost. Conversion of an
+imported transaction also suggests opposite entries on another account within
+three days, so existing statement rows can be linked rather than duplicated.
+
+Schema version 10 and the JSON backup format remain unchanged.
+
+## Version 1.19
+
+Data Health adds a read-only audit of account assignments, transfer pairs,
+possible exact duplicates, reconciliation anchors, balance adjustments,
+auto-tagging rules and investment valuation age. Findings are grouped by
+severity and link back to the relevant workflow, but the audit never edits or
+deletes ledger data.
+
+Statement reconciliation now looks for combinations of up to three pending,
+recently cleared or statement-boundary transactions that exactly explain a
+non-zero difference. Suggestions open the underlying transaction for review;
+they do not change its status automatically.
+
+This release retains schema version 10 and the existing JSON backup format.
+
+## Version 1.18
+
+The monolithic HTML application has been fully separated at screen boundaries.
+`index.html` is now a compact document shell containing semantic markup and
+load order only. Styling lives in `css/app.css`; shared orchestration and
+cross-screen helpers live in `js/app.js`; local theme/PIN behaviour lives in
+`js/device.js`; recurring-transaction detection lives in `js/recurring.js`;
+startup lives in `js/start.js`.
+
+Complete view files now own Dashboard, Reconciliation, Transactions, Planning,
+Investments, Insights, Categories, Import, Net Worth, Accounts and Settings.
+The previously extracted rules, storage, ledger model, investment model, import
+engine, reporting model and shared UI modules remain the sources of business
+logic. This is the intended modularisation stopping point: further extraction
+should be driven by a feature or testability need rather than file size alone.
+
+The extraction is structural. Schema version 10, JSON backup compatibility,
+rules, account calculations, import behaviour and desktop PWA operation are
+unchanged.
+
+## Version 1.17
+
+Settings account management now lives in `js/views/accounts.js`. Account list
+presentation, account-type options and archive/restore interactions have a
+bounded view module, while balances, transaction ownership and legacy-account
+compatibility remain in the core ledger model.
+
+This checkpoint does not change schema version 10, the JSON backup format,
+account calculations, rules or existing PWA behaviour.
+
+## Version 1.16
+
+Net Worth is the first complete screen module, in `js/views/net-worth.js`.
+Account rows, asset/liability panels, snapshot history, snapshot creation and
+the net-worth chart now share one explicit dependency boundary. The extracted
+view consumes the reporting model without owning account calculations.
+
+## Version 1.15
+
+The first shared UI boundary now lives in `js/ui.js`. Currency formatting, UK
+dates, relative timestamps, month labels, safe HTML/attribute escaping and
+transaction-status presentation are no longer duplicated inside the application
+shell. Every screen consumes the same presentation API.
+
+This prepares individual screen extraction while keeping all rendering output,
+CSS, desktop PWA behaviour and financial calculations unchanged.
+
+## Version 1.14
+
+Reusable reporting calculations now live in `js/reports.js`: budget pace and
+pending-card totals, savings opportunities and goal funding, largest
+transactions, rolling spend momentum, weekday spending, savings-rate trends
+and net-worth summaries. Rendering and Chart.js configuration remain in the UI
+shell, so this release changes structure without changing the displayed data.
+
 ## Version 1.13
 
 CSV interpretation now lives in `js/import.js`. The module handles smart text
@@ -283,6 +397,9 @@ detected recurring contributions with a flag if one looks overdue.
 - `js/investments.js` — investment valuation, contribution and portfolio model
 - `js/import.js` — CSV decoding, column inference, row conversion and duplicate
   detection
+- `js/reports.js` — dashboard, savings, spending-insight and net-worth models
+- `js/ui.js` — shared currency/date formatting, escaping and status presentation
+- `js/views/net-worth.js` — Net Worth rendering, snapshots and chart wiring
 - `js/rules.js` — isolated auto-tagging rule normalisation, matching and audit
 - `js/storage.js` — IndexedDB migration, verified persistence and fallback
 - `manifest.json` — PWA manifest (name, icon, theme colour)
