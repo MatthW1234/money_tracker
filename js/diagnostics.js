@@ -2,8 +2,9 @@
   'use strict';
 
   const TOLERANCE=0.005;
+  const money=global.PocketLedgerMoney||{toPence:value=>Math.round(Number(value||0)*100),sum:values=>(values||[]).reduce((sum,value)=>sum+Number(value||0),0),subtract:(a,b)=>Number(a||0)-Number(b||0)};
   const validStatus=value=>['pending','cleared','reconciled'].includes(value)?value:'cleared';
-  const moneyEqual=(a,b,tolerance)=>Math.abs(Number(a||0)-Number(b||0))<(tolerance==null?TOLERANCE:tolerance);
+  const moneyEqual=(a,b,tolerance)=>tolerance==null?money.toPence(a)===money.toPence(b):Math.abs(Number(a||0)-Number(b||0))<tolerance;
   const isoDay=value=>{const time=Date.parse(`${value}T00:00:00Z`);return Number.isFinite(time)?Math.floor(time/86400000):null;};
   const dayDifference=(from,to)=>{const a=isoDay(from),b=isoDay(to);return a==null||b==null?null:b-a;};
   const text=value=>String(value||'').trim().replace(/\s+/g,' ').toUpperCase();
@@ -18,7 +19,17 @@
     const accounts=Array.isArray(db.accountRecords)?db.accountRecords:[];
     const categories=new Set((db.categories||[]).map(category=>category&&category.name).filter(Boolean));
     const accountByName=new Map(accounts.map(account=>[account.name,account]));
+    const accountById=new Map(accounts.map(account=>[account.id,account]));
     const issues=[];
+
+    const duplicateAccountNames=new Map(),duplicateAccountIds=new Map();
+    accounts.forEach(account=>{
+      const name=String(account.name||'').trim().toLowerCase(),nameRows=duplicateAccountNames.get(name)||[];nameRows.push(account);duplicateAccountNames.set(name,nameRows);
+      const id=String(account.id||''),idRows=duplicateAccountIds.get(id)||[];idRows.push(account);duplicateAccountIds.set(id,idRows);
+    });
+    const repeatedNames=[...duplicateAccountNames.values()].filter(rows=>rows.length>1),repeatedIds=[...duplicateAccountIds.values()].filter(rows=>rows.length>1);
+    if(repeatedNames.length)issues.push(issue('accounts','error','duplicate-account-name','Account names are not unique',`${repeatedNames.length} duplicate name group${repeatedNames.length===1?' prevents':'s prevent'} reliable account matching. Rename the affected accounts.`));
+    if(repeatedIds.length)issues.push(issue('accounts','error','duplicate-account-id','Account identifiers are not unique',`${repeatedIds.length} duplicate identifier group${repeatedIds.length===1?' was':'s were'} found. Restore a known-good backup before continuing.`));
 
     const unassigned=transactions.filter(transaction=>!String(transaction.account||'').trim());
     if(unassigned.length)issues.push(issue('accounts','error','unassigned-transactions','Transactions have no account',`${unassigned.length} transaction${unassigned.length===1?' is':'s are'} not assigned to an account.`,{transactionIds:unassigned.map(t=>t.id)}));
@@ -30,6 +41,11 @@
     });
     unknownGroups.forEach((rows,name)=>issues.push(issue('accounts','warning','unknown-account',`Unknown account: ${name}`,`${rows.length} transaction${rows.length===1?' uses':'s use'} an account that is missing from Account Management.`,{account:name,transactionIds:rows.map(t=>t.id)})));
 
+    const orphanIds=transactions.filter(transaction=>transaction.accountId&&!accountById.has(transaction.accountId));
+    if(orphanIds.length)issues.push(issue('accounts','error','orphan-account-id','Transactions reference missing account identifiers',`${orphanIds.length} transaction${orphanIds.length===1?' has':'s have'} an account ID that no longer exists.`,{transactionIds:orphanIds.map(t=>t.id)}));
+    const mismatchedReferences=transactions.filter(transaction=>{const record=accountById.get(transaction.accountId);return record&&transaction.account!==record.name;});
+    if(mismatchedReferences.length)issues.push(issue('accounts','warning','account-reference-mismatch','Account names and identifiers disagree',`${mismatchedReferences.length} transaction${mismatchedReferences.length===1?' needs':'s need'} its display name refreshed from the stable account record.`,{transactionIds:mismatchedReferences.map(t=>t.id)}));
+
     accounts.filter(account=>account.archived).forEach(account=>{
       const rows=transactions.filter(transaction=>transaction.account===account.name);
       if(rows.length)issues.push(issue('accounts','info','archived-account-activity',`${account.name} is archived`,`${rows.length} historical transaction${rows.length===1?' remains':'s remain'} attached to this account. This is expected when the account was closed.`,{account:account.name,transactionIds:rows.map(t=>t.id)}));
@@ -37,6 +53,23 @@
 
     const uncategorised=transactions.filter(transaction=>transaction.amount<0&&!transaction.transferId&&!transaction.excluded&&!(transaction.splits&&transaction.splits.length)&&!transaction.category);
     if(uncategorised.length)issues.push(issue('transactions','warning','uncategorised-spending','Uncategorised spending',`${uncategorised.length} outgoing transaction${uncategorised.length===1?' needs':'s need'} a category or transfer classification.`,{transactionIds:uncategorised.map(t=>t.id)}));
+
+    const splitMismatches=transactions.filter(transaction=>Array.isArray(transaction.splits)&&transaction.splits.length&&!moneyEqual(money.sum(transaction.splits.map(split=>split.amount)),transaction.amount));
+    if(splitMismatches.length)issues.push(issue('transactions','error','split-total-mismatch','Split totals do not match their transactions',`${splitMismatches.length} split transaction${splitMismatches.length===1?' has':'s have'} category parts that do not add to the original amount.`,{transactionIds:splitMismatches.map(t=>t.id)}));
+    const transactionIds=new Map();transactions.forEach(transaction=>{const rows=transactionIds.get(transaction.id)||[];rows.push(transaction);transactionIds.set(transaction.id,rows);});
+    const repeatedTransactionIds=[...transactionIds.values()].filter(rows=>rows.length>1);
+    if(repeatedTransactionIds.length)issues.push(issue('transactions','error','duplicate-transaction-id','Transaction identifiers are not unique',`${repeatedTransactionIds.length} identifier${repeatedTransactionIds.length===1?' appears':'s appear'} on more than one transaction.`,{transactionIds:repeatedTransactionIds.flatMap(rows=>rows.map(t=>t.id))}));
+
+    const sessions=Array.isArray(db.importSessions)?db.importSessions:[],sessionIds=new Set(sessions.map(session=>session.id));
+    const legacyImports=transactions.filter(transaction=>transaction.source==='import'&&!transaction.importProvenance);
+    if(legacyImports.length)issues.push(issue('imports','info','legacy-import-provenance','Older imports have no source-row audit trail',`${legacyImports.length} imported transaction${legacyImports.length===1?' predates':'s predate'} provenance tracking. Their ledger data remains valid, but the original file row cannot be inspected.`,{transactionIds:legacyImports.map(t=>t.id)}));
+    const orphanProvenance=transactions.filter(transaction=>transaction.importProvenance&&transaction.importProvenance.sessionId&&!sessionIds.has(transaction.importProvenance.sessionId));
+    if(orphanProvenance.length)issues.push(issue('imports','error','orphan-import-session','Imported transactions reference missing import sessions',`${orphanProvenance.length} transaction${orphanProvenance.length===1?' points':'s point'} to import history that is no longer present.`,{transactionIds:orphanProvenance.map(t=>t.id)}));
+    const sourceRows=new Map();transactions.filter(transaction=>transaction.importProvenance&&transaction.importProvenance.fileFingerprint).forEach(transaction=>{const source=transaction.importProvenance,key=[transaction.accountId||transaction.account,source.fileFingerprint,source.rowNumber].join('\u0000'),rows=sourceRows.get(key)||[];rows.push(transaction);sourceRows.set(key,rows);});
+    const repeatedSourceRows=[...sourceRows.values()].filter(rows=>rows.length>1);
+    if(repeatedSourceRows.length)issues.push(issue('imports','error','duplicate-source-row','The same statement rows were imported more than once',`${repeatedSourceRows.length} source row${repeatedSourceRows.length===1?' appears':'s appear'} multiple times in the same account.`,{transactionIds:repeatedSourceRows.flatMap(rows=>rows.map(t=>t.id))}));
+    const transactionIdSet=new Set(transactions.map(transaction=>transaction.id)),missingSessionLinks=sessions.flatMap(session=>(session.transactionIds||[]).filter(id=>!transactionIdSet.has(id)).map(id=>({session,id})));
+    if(missingSessionLinks.length)issues.push(issue('imports','warning','missing-imported-transaction','Import history references deleted transactions',`${missingSessionLinks.length} imported transaction reference${missingSessionLinks.length===1?' is':'s are'} no longer present in the ledger.`));
 
     const adjustments=transactions.filter(transaction=>transaction.isAdjustment||transaction.excluded&&text(transaction.description)==='BALANCE ADJUSTMENT');
     if(adjustments.length)issues.push(issue('reconciliation','info','balance-adjustments','Balance adjustments are present',`${adjustments.length} adjustment${adjustments.length===1?' changes':'s change'} account balances without affecting income or spending. Review these before diagnosing an unexplained difference.`,{transactionIds:adjustments.map(t=>t.id)}));
@@ -84,9 +117,11 @@
         issues.push(issue('reconciliation','info','never-reconciled',`${account.name} has never been reconciled`,'Complete a statement check to establish a reliable balance anchor.',{account:account.name}));return;
       }
       const last=history[history.length-1];
+      if(last.importSessionId&&!sessionIds.has(last.importSessionId))issues.push(issue('reconciliation','error','missing-statement-source',`${account.name} reconciliation source is missing`,'The reconciliation audit references an imported statement session that is no longer present.',{account:account.name,reconciliationId:last.id}));
+      if(Number(last.statementOnlyCount)>0)issues.push(issue('reconciliation','warning','statement-only-rows',`${account.name} reconciliation retained unmatched statement rows`,`${last.statementOnlyCount} statement row${last.statementOnlyCount===1?' had':'s had'} no linked ledger transaction when the reconciliation was completed.`,{account:account.name,reconciliationId:last.id}));
       const opening=Number(account.openingBalance)||0;
-      const calculated=transactions.filter(transaction=>transaction.account===account.name&&transaction.date<=last.statementDate&&validStatus(transaction.status)!=='pending').reduce((sum,transaction)=>sum+Number(transaction.amount||0),opening);
-      const drift=Number(last.statementBalance)-calculated;
+      const calculated=money.sum([opening,...transactions.filter(transaction=>(transaction.accountId===account.id||!transaction.accountId&&transaction.account===account.name)&&transaction.date<=last.statementDate&&validStatus(transaction.status)!=='pending').map(transaction=>transaction.amount)]);
+      const drift=money.subtract(last.statementBalance,calculated);
       if(!moneyEqual(drift,0))issues.push(issue('reconciliation','error','reconciliation-drift',`${account.name} no longer matches its last reconciliation`,`The ${last.statementDate} statement anchor now differs by £${Math.abs(drift).toFixed(2)}. A backdated edit, deletion or status change may have occurred.`,{account:account.name,reconciliationId:last.id,amount:drift}));
       if(global.PocketLedgerReconciliation&&Array.isArray(last.transactionSnapshots)&&last.transactionSnapshots.length){
         const audit=global.PocketLedgerReconciliation.snapshotAudit(last,transactions,account.name);

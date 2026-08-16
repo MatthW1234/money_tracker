@@ -1,7 +1,8 @@
 (function(global){
   'use strict';
 
-  const roundMoney=value=>Math.round(Number(value)*100)/100;
+  const money=global.PocketLedgerMoney||{round:value=>Math.round(Number(value)*100)/100,subtract:(a,b)=>Math.round((Number(a)-Number(b))*100)/100,absolute:value=>Math.abs(Number(value))};
+  const roundMoney=value=>money.round(value);
   function createPair(input){
     const value=input||{},sent=roundMoney(value.sentAmount),received=roundMoney(value.receivedAmount==null?sent:value.receivedAmount);
     const from=String(value.fromAccount||'').trim(),to=String(value.toAccount||'').trim();
@@ -9,7 +10,7 @@
     if(from===to)throw new Error('From and To accounts must be different.');
     if(!Number.isFinite(sent)||sent<=0||!Number.isFinite(received)||received<=0)throw new Error('Transfer amounts must be positive.');
     if(typeof value.uid!=='function')throw new Error('A transfer ID generator is required.');
-    const transferId=value.uid('xfer'),fee=Math.abs(roundMoney(sent-received));
+    const transferId=value.uid('xfer'),fee=money.absolute(money.subtract(sent,received));
     const status=['pending','cleared'].includes(value.status)?value.status:'cleared';
     const description=String(value.description||'').trim(),notes=String(value.notes||'').trim();
     const shared={category:'',notes,source:value.source||'manual',transferId,status};

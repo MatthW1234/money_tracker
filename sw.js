@@ -7,12 +7,13 @@
 // first for speed and only re-checked in the background.
 // Your data itself is not cached here — that's handled by the app's own storage.
 
-const CACHE = 'pocket-ledger-v25';
+const CACHE = 'pocket-ledger-v28';
 const APP_SHELL = ['./', './index.html', './manifest.json', './icon.svg'];
 const VENDOR = [
   './vendor/chart.umd.min.js',
   './vendor/papaparse.min.js',
   './css/app.css',
+  './js/money.js',
   './js/rules.js',
   './js/storage.js',
   './js/model.js',

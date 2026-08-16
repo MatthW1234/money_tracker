@@ -1,5 +1,54 @@
 # Pocket Ledger
 
+## Version 1.25
+
+The reconciliation wizard can now use a retained import session as its
+statement source. Selecting one fills the imported period and, where the CSV
+provided a running-balance column, its closing balance. The matching stage then
+shows three explicit groups: linked statement rows, entries found only in the
+ledger, and rows found only in the statement.
+
+Applying the suggested matches is a confirmed action. Linked rows become
+Cleared, ledger-only entries become Pending and previously reconciled entries
+remain locked. Individual checkboxes remain editable before completion. The
+resulting audit record stores the source filename and fingerprint together with
+all three matching counts, and reopening returns to the same statement source.
+
+This advances the schema to version 14 while preserving legacy manual
+reconciliations and schema-13 import history.
+
+## Version 1.24
+
+New CSV imports now create an audit session. Pocket Ledger stores a local file
+fingerprint, the destination account, the original statement row number, raw
+mapped values and the outcome of every parsed row. The Import screen exposes
+this history, while Data Health detects missing sessions and accidental reuse
+of the same source row.
+
+Column mapping profiles are saved per account and statement header layout. A
+later statement in the same format therefore opens with the previous mapping,
+date convention and amount-direction choice already applied. Duplicate checks
+are account-specific and source provenance survives later edits to the readable
+transaction description.
+
+This advances the schema to version 13. Older imports are preserved unchanged;
+they are labelled as legacy provenance because their original CSV rows were not
+available to earlier releases.
+
+## Version 1.23
+
+Version 1.23 establishes a common accuracy layer beneath the existing app.
+Money is rounded and summed at penny precision through `js/money.js`, rather
+than allowing long chains of binary floating-point additions to determine a
+displayed balance. Stable account IDs are now the authoritative link between
+transactions and Account Management; account names remain readable labels and
+are refreshed automatically after a rename or restore.
+
+Data Health additionally reports duplicate account identities, orphaned or
+mismatched account references, duplicate transaction IDs and invalid split
+totals. Schema-11 backups migrate to schema 12 while retaining transactions,
+rules, transfer pairs, valuations and reconciliation audit snapshots.
+
 ## Version 1.22
 
 Completed reconciliations now retain an audit snapshot: statement period,

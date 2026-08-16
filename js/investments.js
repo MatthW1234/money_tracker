@@ -2,6 +2,7 @@
   'use strict';
 
   const INVESTMENT_TYPES=new Set(['investment','pension']);
+  const money=global.PocketLedgerMoney||{sum:values=>(values||[]).reduce((sum,value)=>sum+Number(value||0),0),add:(a,b)=>Number(a||0)+Number(b||0)};
 
   function create(deps){
     const getDB=deps.getDB;
@@ -32,31 +33,21 @@
     }
 
     function accountTransactionsTotal(account,fromExclusive,toInclusive){
-      return db().transactions.reduce((sum,t)=>{
-        if(t.account!==account||transactionStatus(t)==='pending')return sum;
-        if(fromExclusive&&t.date<=fromExclusive)return sum;
-        if(toInclusive&&t.date>toInclusive)return sum;
-        return sum+Number(t.amount||0);
-      },0);
+      return money.sum(db().transactions.filter(t=>t.account===account&&transactionStatus(t)!=='pending'&&(!fromExclusive||t.date>fromExclusive)&&(!toInclusive||t.date<=toInclusive)).map(t=>t.amount));
     }
 
     function accountTransferFlow(account,fromExclusive,toInclusive){
-      return db().transactions.reduce((sum,t)=>{
-        if(t.account!==account||!t.transferId||transactionStatus(t)==='pending')return sum;
-        if(fromExclusive&&t.date<=fromExclusive)return sum;
-        if(toInclusive&&t.date>toInclusive)return sum;
-        return sum+Number(t.amount||0);
-      },0);
+      return money.sum(db().transactions.filter(t=>t.account===account&&t.transferId&&transactionStatus(t)!=='pending'&&(!fromExclusive||t.date>fromExclusive)&&(!toInclusive||t.date<=toInclusive)).map(t=>t.amount));
     }
 
     function accountBalanceByName(account,asOfDate){
       const record=accountRecordFor(account),limit=asOfDate||todayISO();
       if(isInvestmentRecord(record)){
         const valuation=latestInvestmentValuation(record.id,limit);
-        if(valuation)return valuation.value+accountTransactionsTotal(account,valuation.date,limit);
+        if(valuation)return money.add(valuation.value,accountTransactionsTotal(account,valuation.date,limit));
       }
       const rows=db().transactions.filter(t=>t.account===account&&transactionStatus(t)!=='pending'&&(!asOfDate||t.date<=asOfDate));
-      return accountOpeningBalance(account)+rows.reduce((sum,t)=>sum+Number(t.amount||0),0);
+      return money.add(accountOpeningBalance(account),money.sum(rows.map(t=>t.amount)));
     }
 
     function investmentValuationPerformance(valuation){

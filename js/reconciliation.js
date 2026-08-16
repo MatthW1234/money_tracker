@@ -1,6 +1,8 @@
 (function(global){
   'use strict';
 
+  const money=global.PocketLedgerMoney||{round:value=>Math.round(Number(value)*100)/100,sum:values=>(values||[]).reduce((sum,value)=>sum+Number(value||0),0),add:(a,b)=>Number(a||0)+Number(b||0),subtract:(a,b)=>Number(a||0)-Number(b||0)};
+
   const status=transaction=>['pending','cleared','reconciled'].includes(transaction&&transaction.status)?transaction.status:'cleared';
   const addDays=(iso,days)=>{const date=new Date(`${iso}T12:00:00`);date.setDate(date.getDate()+days);return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;};
   function historyFor(db,account){const record=db&&db.reconciliations&&db.reconciliations[account];return record&&Array.isArray(record.history)?record.history:[];}
@@ -15,12 +17,12 @@
     const periodRows=rows.filter(transaction=>!startDate||transaction.date>=startDate);
     const included=rows.filter(transaction=>status(transaction)!=='pending');
     const openingBalance=Number(record.openingBalance)||0;
-    const calculatedClosing=openingBalance+included.reduce((sum,transaction)=>sum+Number(transaction.amount||0),0);
+    const calculatedClosing=money.add(openingBalance,money.sum(included.map(transaction=>transaction.amount)));
     const periodIncluded=periodRows.filter(transaction=>status(transaction)!=='pending');
-    const inflows=periodIncluded.filter(transaction=>transaction.amount>0).reduce((sum,transaction)=>sum+Number(transaction.amount),0);
-    const outflows=periodIncluded.filter(transaction=>transaction.amount<0).reduce((sum,transaction)=>sum+Math.abs(Number(transaction.amount)),0);
+    const inflows=money.sum(periodIncluded.filter(transaction=>transaction.amount>0).map(transaction=>transaction.amount));
+    const outflows=money.sum(periodIncluded.filter(transaction=>transaction.amount<0).map(transaction=>Math.abs(Number(transaction.amount))));
     const statementBalance=value.statementBalance==null?null:Number(value.statementBalance);
-    const difference=statementBalance==null||!Number.isFinite(statementBalance)?null:statementBalance-calculatedClosing;
+    const difference=statementBalance==null||!Number.isFinite(statementBalance)?null:money.subtract(statementBalance,calculatedClosing);
     const previous=previousReconciliation(db,account,endDate);
     return {
       account,startDate,endDate,previous,openingBalance,statementBalance,calculatedClosing,difference,
@@ -32,7 +34,7 @@
 
   function transactionSnapshot(transaction){
     return {
-      id:transaction.id,date:transaction.date,description:String(transaction.description||''),amount:Number(transaction.amount)||0,
+      id:transaction.id,date:transaction.date,description:String(transaction.description||''),amount:money.round(transaction.amount),
       category:String(transaction.category||''),account:String(transaction.account||''),status:status(transaction),
       transferId:transaction.transferId||null,excluded:!!transaction.excluded,isAdjustment:!!transaction.isAdjustment,
     };
@@ -51,5 +53,28 @@
     return {available:true,missing,changed,unexpected,ok:!missing.length&&!changed.length&&!unexpected.length};
   }
 
-  global.PocketLedgerReconciliation={status,addDays,historyFor,previousReconciliation,suggestedStartDate,buildSession,transactionSnapshot,snapshotAudit};
+  function statementMatchSummary(importSession,transactions,account,startDate,endDate){
+    if(!importSession)return {available:false,matched:[],ledgerOnly:[],statementOnly:[],matchedIds:new Set()};
+    const all=transactions||[],byId=new Map(all.map(transaction=>[transaction.id,transaction]));
+    const statementRows=(importSession.rows||[]).filter(row=>(!startDate||!row.date||row.date>=startDate)&&(!endDate||!row.date||row.date<=endDate));
+    const matched=[],statementOnly=[];
+    statementRows.forEach(row=>{
+      const transaction=row.transactionId&&byId.get(row.transactionId);
+      if(transaction&&transaction.account===account){matched.push({row,transaction});}
+      else statementOnly.push(row);
+    });
+    const matchedIds=new Set(matched.map(item=>item.transaction.id));
+    const ledgerOnly=all.filter(transaction=>transaction.account===account&&transaction.date&&(!startDate||transaction.date>=startDate)&&(!endDate||transaction.date<=endDate)&&status(transaction)!=='reconciled'&&!matchedIds.has(transaction.id));
+    return {available:true,matched,ledgerOnly,statementOnly,matchedIds};
+  }
+
+  function applyStatementMatches(summary){
+    if(!summary||!summary.available)return {matched:0,pending:0};
+    let matched=0,pending=0;
+    summary.matched.forEach(item=>{if(status(item.transaction)!=='reconciled'){item.transaction.status='cleared';matched++;}});
+    summary.ledgerOnly.forEach(transaction=>{if(status(transaction)!=='reconciled'){transaction.status='pending';pending++;}});
+    return {matched,pending};
+  }
+
+  global.PocketLedgerReconciliation={status,addDays,historyFor,previousReconciliation,suggestedStartDate,buildSession,transactionSnapshot,snapshotAudit,statementMatchSummary,applyStatementMatches};
 })(window);

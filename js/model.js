@@ -18,6 +18,7 @@
 
   function create(deps){
     const {getDB,uid,clamp,buildEmptyDB,defaultCategories,normaliseRules,schemaVersion,appVersion}=deps;
+    const money=deps.money||global.PocketLedgerMoney||{round:value=>Math.round(Number(value)*100)/100,sum:values=>(values||[]).reduce((total,value)=>total+Number(value||0),0),add:(a,b)=>Number(a||0)+Number(b||0)};
 
     function db(){return getDB();}
     function isPlainObject(value){return !!value&&typeof value==='object'&&!Array.isArray(value);}
@@ -39,7 +40,7 @@
     function makeAccountRecord(name,type,openingBalance,extra){
       return Object.assign({
         id:uid('acct'),name:String(name||'').trim(),type:type||inferAccountType(name),institution:'',currency:'GBP',
-        openingBalance:Number(openingBalance)||0,openingBalanceDate:'',creditLimit:null,
+        openingBalance:money.round(openingBalance),openingBalanceDate:'',creditLimit:null,
         archived:false,includeInNetWorth:true,createdAt:new Date().toISOString(),
       },extra||{});
     }
@@ -54,9 +55,11 @@
       return [transaction];
     }
     function expandSplits(list){return (list||[]).flatMap(categoryRowsFor);}
-    function sumIncome(list){return list.reduce((sum,t)=>(t.amount>0&&countsTowardTotals(t))?sum+t.amount:sum,0);}
-    function sumExpense(list){return list.reduce((sum,t)=>(t.amount<0&&countsTowardTotals(t))?sum+Math.abs(t.amount):sum,0);}
-    function accountRecordFor(name){return (db().accountRecords||[]).find(record=>record.name===name)||null;}
+    function sumIncome(list){return money.sum((list||[]).filter(t=>t.amount>0&&countsTowardTotals(t)).map(t=>t.amount));}
+    function sumExpense(list){return money.sum((list||[]).filter(t=>t.amount<0&&countsTowardTotals(t)).map(t=>Math.abs(t.amount)));}
+    function accountRecordFor(reference){return (db().accountRecords||[]).find(record=>record.id===reference||record.name===reference)||null;}
+    function transactionAccountRecord(transaction){return accountRecordFor(transaction&&transaction.accountId)||accountRecordFor(transaction&&transaction.account)||null;}
+    function transactionBelongsToAccount(transaction,reference){const record=accountRecordFor(reference);return record?transactionAccountRecord(transaction)===record:!!transaction&&transaction.account===reference;}
     function allAccountNames(){
       const ledger=db(),names=new Set((ledger.accountRecords||[]).map(record=>record.name));
       (ledger.accounts||[]).forEach(name=>names.add(name));
@@ -81,7 +84,9 @@
       ledger.accounts=(ledger.accountRecords||[]).map(record=>record.name);
       ledger.accountStartingBalances={};
       ledger.accountRecords.forEach(record=>{ledger.accountStartingBalances[record.name]=Number(record.openingBalance)||0;});
-      ledger.transactions.forEach(transaction=>{const record=accountRecordFor(transaction.account);if(record)transaction.accountId=record.id;});
+      ledger.transactions.forEach(transaction=>{const record=transactionAccountRecord(transaction);if(record){transaction.accountId=record.id;transaction.account=record.name;}});
+      (ledger.importSessions||[]).forEach(session=>{const record=accountRecordFor(session.accountId)||accountRecordFor(session.accountName);if(record){session.accountId=record.id;session.accountName=record.name;}});
+      (ledger.importProfiles||[]).forEach(profile=>{const record=accountRecordFor(profile.accountId)||accountRecordFor(profile.accountName);if(record){profile.accountId=record.id;profile.accountName=record.name;}});
       ledger.startingBalance=ledger.accountRecords.length?(Number(ledger.accountRecords[0].openingBalance)||0):0;
     }
     function ensureAccountRecord(name){
@@ -97,11 +102,10 @@
       return (ledger.accounts||[])[0]===account?(Number(ledger.startingBalance)||0):0;
     }
     function accountTransactionsTo(account,date){
-      return db().transactions.filter(t=>t.account===account&&t.date<=date).sort((a,b)=>a.date.localeCompare(b.date)||a.description.localeCompare(b.description));
+      return db().transactions.filter(t=>transactionBelongsToAccount(t,account)&&t.date<=date).sort((a,b)=>a.date.localeCompare(b.date)||a.description.localeCompare(b.description));
     }
     function clearedAccountBalance(account,date){
-      return accountOpeningBalance(account)+accountTransactionsTo(account,date)
-        .filter(t=>transactionStatus(t)!=='pending').reduce((sum,t)=>sum+Number(t.amount||0),0);
+      return money.add(accountOpeningBalance(account),money.sum(accountTransactionsTo(account,date).filter(t=>transactionStatus(t)!=='pending').map(t=>t.amount)));
     }
     function reconciliationHistory(account){
       const reconciliation=db().reconciliations[account];
@@ -111,7 +115,7 @@
       const ledger=db(),liquidTypes=new Set(['current','savings','cash','credit_card']);
       const names=allAccountNames().filter(name=>liquidTypes.has((accountRecordFor(name)||{}).type||'current'));
       const opening=names.length?names.reduce((sum,name)=>sum+accountOpeningBalance(name),0):((ledger.accountRecords||[]).length?0:(Number(ledger.startingBalance)||0));
-      return opening+ledger.transactions.reduce((sum,t)=>t.status==='pending'||(t.account&&!names.includes(t.account))?sum:sum+t.amount,0);
+      return money.add(opening,money.sum(ledger.transactions.filter(t=>t.status!=='pending'&&(!t.account||names.includes(t.account))).map(t=>t.amount)));
     }
 
     function normaliseTransaction(raw){
@@ -119,15 +123,25 @@
       const amount=Number(raw.amount);
       if(!validISODate(raw.date)||!Number.isFinite(amount)||!String(raw.description||'').trim())return null;
       const clean=Object.assign({},raw,{
-        id:typeof raw.id==='string'&&raw.id?raw.id:uid('tx'),date:raw.date,description:String(raw.description).trim(),amount,
+        id:typeof raw.id==='string'&&raw.id?raw.id:uid('tx'),date:raw.date,description:String(raw.description).trim(),amount:money.round(amount),
         category:typeof raw.category==='string'?raw.category:'',account:typeof raw.account==='string'?raw.account:'',
         notes:typeof raw.notes==='string'?raw.notes:'',source:typeof raw.source==='string'?raw.source:'restored',
         status:transactionStatus(raw),excluded:!!raw.excluded,
       });
       if(Array.isArray(raw.splits)){
         clean.splits=raw.splits.map(split=>isPlainObject(split)&&Number.isFinite(Number(split.amount))?{
-          id:typeof split.id==='string'&&split.id?split.id:uid('split'),category:typeof split.category==='string'?split.category:'',amount:Number(split.amount),
+          id:typeof split.id==='string'&&split.id?split.id:uid('split'),category:typeof split.category==='string'?split.category:'',amount:money.round(split.amount),
         }:null).filter(Boolean);
+      }
+      if(isPlainObject(raw.importProvenance)){
+        const source=raw.importProvenance;
+        clean.importProvenance={
+          sessionId:typeof source.sessionId==='string'?source.sessionId:'',fileName:typeof source.fileName==='string'?source.fileName:'',
+          fileFingerprint:typeof source.fileFingerprint==='string'?source.fileFingerprint:'',rowNumber:Math.max(1,Math.round(Number(source.rowNumber)||1)),
+          rawDate:typeof source.rawDate==='string'?source.rawDate:'',rawDescription:typeof source.rawDescription==='string'?source.rawDescription:'',
+          rawAmount:typeof source.rawAmount==='string'?source.rawAmount:'',rawRow:Array.isArray(source.rawRow)?source.rawRow.map(value=>String(value==null?'':value)):[],
+          importedAt:typeof source.importedAt==='string'?source.importedAt:'',profileId:typeof source.profileId==='string'?source.profileId:'',
+        };
       }
       return clean;
     }
@@ -181,10 +195,43 @@
       const record=accountRecords.find(item=>item.id===raw.accountId)||accountRecords.find(item=>item.name===raw.accountName);
       if(!record||!['investment','pension'].includes(record.type))return null;
       return {
-        id:typeof raw.id==='string'&&raw.id?raw.id:uid('val'),accountId:record.id,accountName:record.name,date:raw.date,value:Number(raw.value),
+        id:typeof raw.id==='string'&&raw.id?raw.id:uid('val'),accountId:record.id,accountName:record.name,date:raw.date,value:money.round(raw.value),
         currency:typeof raw.currency==='string'&&raw.currency?raw.currency:(record.currency||'GBP'),
         source:['manual','csv','api'].includes(raw.source)?raw.source:'manual',notes:typeof raw.notes==='string'?raw.notes:'',
         createdAt:typeof raw.createdAt==='string'?raw.createdAt:new Date().toISOString(),updatedAt:typeof raw.updatedAt==='string'?raw.updatedAt:null,
+      };
+    }
+    function normaliseImportProfile(raw,accountRecords){
+      if(!isPlainObject(raw)||!String(raw.headerSignature||''))return null;
+      const record=accountRecords.find(item=>item.id===raw.accountId)||accountRecords.find(item=>item.name===raw.accountName);
+      if(!record)return null;
+      return {
+        id:typeof raw.id==='string'&&raw.id?raw.id:uid('profile'),name:typeof raw.name==='string'&&raw.name?raw.name:`${record.name} CSV`,
+        accountId:record.id,accountName:record.name,headerSignature:String(raw.headerSignature),mapping:isPlainObject(raw.mapping)?Object.assign({},raw.mapping):{},
+        dateFormat:['DMY','MDY','YMD'].includes(raw.dateFormat)?raw.dateFormat:'DMY',negativeIsOutgoing:raw.negativeIsOutgoing!==false,
+        hasHeader:raw.hasHeader!==false,updatedAt:typeof raw.updatedAt==='string'?raw.updatedAt:new Date().toISOString(),
+      };
+    }
+    function normaliseImportSession(raw,accountRecords){
+      if(!isPlainObject(raw)||!String(raw.id||'')||!String(raw.fileName||''))return null;
+      const record=accountRecords.find(item=>item.id===raw.accountId)||accountRecords.find(item=>item.name===raw.accountName);
+      if(!record)return null;
+      const rows=Array.isArray(raw.rows)?raw.rows.filter(isPlainObject).map(row=>({
+        rowNumber:Math.max(1,Math.round(Number(row.rowNumber)||1)),status:['imported','duplicate','excluded','invalid'].includes(row.status)?row.status:'excluded',
+        transactionId:typeof row.transactionId==='string'?row.transactionId:'',date:validISODate(row.date)?row.date:'',description:typeof row.description==='string'?row.description:'',
+        amount:money.round(row.amount),
+      })):[];
+      return {
+        id:String(raw.id),fileName:String(raw.fileName),fileFingerprint:typeof raw.fileFingerprint==='string'?raw.fileFingerprint:'',
+        importedAt:typeof raw.importedAt==='string'?raw.importedAt:new Date().toISOString(),accountId:record.id,accountName:record.name,
+        profileId:typeof raw.profileId==='string'?raw.profileId:'',headerSignature:typeof raw.headerSignature==='string'?raw.headerSignature:'',
+        mapping:isPlainObject(raw.mapping)?Object.assign({},raw.mapping):{},dateFormat:['DMY','MDY','YMD'].includes(raw.dateFormat)?raw.dateFormat:'DMY',
+        negativeIsOutgoing:raw.negativeIsOutgoing!==false,hasHeader:raw.hasHeader!==false,totalRows:Math.max(0,Math.round(Number(raw.totalRows)||rows.length)),
+        importedCount:Math.max(0,Math.round(Number(raw.importedCount)||0)),duplicateCount:Math.max(0,Math.round(Number(raw.duplicateCount)||0)),
+        excludedCount:Math.max(0,Math.round(Number(raw.excludedCount)||0)),invalidCount:Math.max(0,Math.round(Number(raw.invalidCount)||0)),
+        startDate:validISODate(raw.startDate)?raw.startDate:'',endDate:validISODate(raw.endDate)?raw.endDate:'',
+        closingBalance:raw.closingBalance==null||!Number.isFinite(Number(raw.closingBalance))?null:money.round(raw.closingBalance),
+        transactionIds:Array.isArray(raw.transactionIds)?raw.transactionIds.filter(value=>typeof value==='string'):[],rows,
       };
     }
     function normaliseReconciliations(raw,transactions){
@@ -198,18 +245,21 @@
           const transactionIds=Array.isArray(entry.transactionIds)?entry.transactionIds.filter(value=>typeof value==='string'):(transactions||[]).filter(transaction=>transaction.reconciliationId===id).map(transaction=>transaction.id);
           const snapshots=Array.isArray(entry.transactionSnapshots)?entry.transactionSnapshots.filter(snapshot=>isPlainObject(snapshot)&&typeof snapshot.id==='string').map(snapshot=>({
             id:snapshot.id,date:validISODate(snapshot.date)?snapshot.date:'',description:typeof snapshot.description==='string'?snapshot.description:'',
-            amount:finiteNumber(Number(snapshot.amount),0),category:typeof snapshot.category==='string'?snapshot.category:'',account:typeof snapshot.account==='string'?snapshot.account:account,
+            amount:money.round(finiteNumber(Number(snapshot.amount),0)),category:typeof snapshot.category==='string'?snapshot.category:'',account:typeof snapshot.account==='string'?snapshot.account:account,
             status:['pending','cleared','reconciled'].includes(snapshot.status)?snapshot.status:'reconciled',transferId:typeof snapshot.transferId==='string'?snapshot.transferId:null,
             excluded:!!snapshot.excluded,isAdjustment:!!snapshot.isAdjustment,
           })):[];
           return Object.assign({},entry,{
-            id,statementDate:entry.statementDate,statementStartDate:validISODate(entry.statementStartDate)?entry.statementStartDate:'',statementBalance:Number(entry.statementBalance),
-            openingBalance:entry.openingBalance==null?null:finiteNumber(Number(entry.openingBalance),null),calculatedBalance:entry.calculatedBalance==null?null:finiteNumber(Number(entry.calculatedBalance),null),
-            inflows:entry.inflows==null?null:finiteNumber(Number(entry.inflows),null),outflows:entry.outflows==null?null:finiteNumber(Number(entry.outflows),null),
-            differenceAtCompletion:entry.differenceAtCompletion==null?0:finiteNumber(Number(entry.differenceAtCompletion),0),
+            id,statementDate:entry.statementDate,statementStartDate:validISODate(entry.statementStartDate)?entry.statementStartDate:'',statementBalance:money.round(entry.statementBalance),
+            openingBalance:entry.openingBalance==null?null:money.round(finiteNumber(Number(entry.openingBalance),0)),calculatedBalance:entry.calculatedBalance==null?null:money.round(finiteNumber(Number(entry.calculatedBalance),0)),
+            inflows:entry.inflows==null?null:money.round(finiteNumber(Number(entry.inflows),0)),outflows:entry.outflows==null?null:money.round(finiteNumber(Number(entry.outflows),0)),
+            differenceAtCompletion:entry.differenceAtCompletion==null?0:money.round(finiteNumber(Number(entry.differenceAtCompletion),0)),
             completedAt:typeof entry.completedAt==='string'?entry.completedAt:new Date().toISOString(),transactionCount:Math.max(0,Math.round(Number(entry.transactionCount)||transactionIds.length)),
             transactionIds,transactionSnapshots:snapshots,balanceAdjustmentIds:Array.isArray(entry.balanceAdjustmentIds)?entry.balanceAdjustmentIds.filter(value=>typeof value==='string'):[],
             diagnosticWarnings:Array.isArray(entry.diagnosticWarnings)?entry.diagnosticWarnings.filter(value=>typeof value==='string'):[],auditVersion:entry.auditVersion===1||snapshots.length?1:0,
+            importSessionId:typeof entry.importSessionId==='string'?entry.importSessionId:'',statementFileName:typeof entry.statementFileName==='string'?entry.statementFileName:'',
+            statementFileFingerprint:typeof entry.statementFileFingerprint==='string'?entry.statementFileFingerprint:'',
+            statementMatchedCount:Math.max(0,Math.round(Number(entry.statementMatchedCount)||0)),statementOnlyCount:Math.max(0,Math.round(Number(entry.statementOnlyCount)||0)),ledgerOnlyCount:Math.max(0,Math.round(Number(entry.ledgerOnlyCount)||0)),
           });
         }).filter(Boolean);
         result[account]=Object.assign({},value,{history});
@@ -253,6 +303,8 @@
       if(invalidTransactions)throw new Error(`${invalidTransactions} transaction${invalidTransactions===1?' is':'s are'} invalid.`);
       const importedMigration=migrateLegacyImportedAssignments(raw,transactions);
       const accountRecords=migrateAccountRecords(raw,transactions).filter(record=>!isLegacyImportedAccount(record.name));
+      const duplicateNames=new Map();accountRecords.forEach(record=>{const key=record.name.trim().toLowerCase(),rows=duplicateNames.get(key)||[];rows.push(record);duplicateNames.set(key,rows);});
+      const duplicateAccountCount=[...duplicateNames.values()].filter(rows=>rows.length>1).length;
       const clean=Object.assign(buildEmptyDB(),{
         schemaVersion,appVersion,startingBalance:finiteNumber(Number(raw.startingBalance),0),
         categories:raw.categories.filter(c=>isPlainObject(c)&&typeof c.name==='string'&&['income','expense'].includes(c.kind)).map(c=>({name:c.name,kind:c.kind})),
@@ -267,6 +319,8 @@
         investmentCategories:Array.isArray(raw.investmentCategories)?raw.investmentCategories.filter(x=>typeof x==='string'):[],
         pendingCards:Array.isArray(raw.pendingCards)?raw.pendingCards.filter(isPlainObject):[],reconciliations:normaliseReconciliations(raw.reconciliations,transactions),
         lastBackupAt:typeof raw.lastBackupAt==='string'?raw.lastBackupAt:null,lastImport:isPlainObject(raw.lastImport)?raw.lastImport:null,
+        importProfiles:Array.isArray(raw.importProfiles)?raw.importProfiles.map(profile=>normaliseImportProfile(profile,accountRecords)).filter(Boolean):[],
+        importSessions:Array.isArray(raw.importSessions)?raw.importSessions.map(session=>normaliseImportSession(session,accountRecords)).filter(Boolean):[],
         netWorthSnapshots:Array.isArray(raw.netWorthSnapshots)?raw.netWorthSnapshots.filter(s=>isPlainObject(s)&&validISODate(s.date)&&Number.isFinite(Number(s.netWorth))).map(s=>Object.assign({},s,{netWorth:Number(s.netWorth),totalAssets:Number(s.totalAssets)||0,totalLiabilities:Number(s.totalLiabilities)||0})):[],
         investmentValuations:Array.isArray(raw.investmentValuations)?raw.investmentValuations.map(v=>normaliseInvestmentValuation(v,accountRecords)).filter(Boolean):[],
       });
@@ -283,7 +337,9 @@
       }
       clean.accounts=accountRecords.map(record=>record.name);clean.accountStartingBalances={};
       accountRecords.forEach(record=>{clean.accountStartingBalances[record.name]=record.openingBalance;});
-      clean.transactions.forEach(t=>{const record=accountRecords.find(item=>item.name===t.account);if(record)t.accountId=record.id;});
+      let repairedAccountLinks=0;
+      clean.transactions.forEach(t=>{const record=accountRecords.find(item=>item.id===t.accountId)||accountRecords.find(item=>item.name===t.account);if(record){if(t.accountId!==record.id||t.account!==record.name)repairedAccountLinks++;t.accountId=record.id;t.account=record.name;}});
+      if(repairedAccountLinks||duplicateAccountCount)clean.integrityMigration={repairedAccountLinks,duplicateAccountNames:duplicateAccountCount,migratedAt:new Date().toISOString()};
       if(accountRecords.length)clean.startingBalance=accountRecords[0].openingBalance;
       if(!clean.categories.length)clean.categories=JSON.parse(JSON.stringify(defaultCategories));
       return clean;
@@ -291,10 +347,10 @@
 
     return {
       isPlainObject,validISODate,finiteNumber,accountTypeConfig,isLiabilityType,inferAccountType,makeAccountRecord,
-      transactionStatus,countsTowardTotals,categoryRowsFor,expandSplits,sumIncome,sumExpense,accountRecordFor,
+      transactionStatus,countsTowardTotals,categoryRowsFor,expandSplits,sumIncome,sumExpense,accountRecordFor,transactionAccountRecord,transactionBelongsToAccount,
       allAccountNames,activeAccountNames,isLegacyImportedAccount,preferredImportAccountName,syncLegacyAccounts,
       ensureAccountRecord,accountOpeningBalance,accountTransactionsTo,clearedAccountBalance,reconciliationHistory,currentBalance,
-      normaliseTransaction,normaliseAccountRecord,normaliseRecurringItem,normaliseSavingsGoal,normaliseInvestmentValuation,normaliseReconciliations,
+      normaliseTransaction,normaliseAccountRecord,normaliseRecurringItem,normaliseSavingsGoal,normaliseInvestmentValuation,normaliseImportProfile,normaliseImportSession,normaliseReconciliations,
       migrateAccountRecords,preferredCurrentAccountNameFromRaw,migrateLegacyImportedAssignments,normaliseDB,
     };
   }

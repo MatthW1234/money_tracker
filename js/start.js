@@ -68,6 +68,8 @@ async function init(){
   if(!DB.netWorthSnapshots) DB.netWorthSnapshots = [];
   if(!DB.investmentValuations) DB.investmentValuations = [];
   if(DB.lastImport === undefined) DB.lastImport = null;
+  if(!DB.importSessions) DB.importSessions = [];
+  if(!DB.importProfiles) DB.importProfiles = [];
   if(!loaded || (loaded.schemaVersion||1)!==SCHEMA_VERSION) scheduleSave();
 
   if(!IN_CLAUDE&&BROWSER_STORAGE&&BROWSER_STORAGE.status().migrated){

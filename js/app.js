@@ -2,11 +2,12 @@
    POCKET LEDGER — application shell and UI logic
    ========================================================= */
 
-const APP_VERSION = '1.22';
-const SCHEMA_VERSION = 11;
+const APP_VERSION = '1.25';
+const SCHEMA_VERSION = 14;
 const STORAGE_KEY = 'pocketledger:data:v1';
 const PRE_RESTORE_KEY = 'pocketledger_pre_restore_v1';
 const {gbp,ukDate,ukDateShort,timeAgoLabel,monthLabel,escHTML,escAttr,statusLabel,statusPillHTML}=PocketLedgerUI.create();
+const Money=PocketLedgerMoney;
 
 const ACCOUNT_TYPES=PocketLedgerModel.ACCOUNT_TYPES;
 const RECURRING_FREQUENCIES=PocketLedgerModel.RECURRING_FREQUENCIES;
@@ -83,13 +84,14 @@ function nextMonthDate(day){
 const {
   isPlainObject,validISODate,finiteNumber,accountTypeConfig,isLiabilityType,inferAccountType,makeAccountRecord,
   transactionStatus,countsTowardTotals,categoryRowsFor,expandSplits,sumIncome,sumExpense,accountRecordFor,
+  transactionAccountRecord,transactionBelongsToAccount,
   allAccountNames,activeAccountNames,isLegacyImportedAccount,preferredImportAccountName,syncLegacyAccounts,
   ensureAccountRecord,accountOpeningBalance,accountTransactionsTo,clearedAccountBalance,reconciliationHistory,currentBalance,
   normaliseTransaction,normaliseAccountRecord,normaliseRecurringItem,normaliseSavingsGoal,normaliseInvestmentValuation,
   migrateAccountRecords,preferredCurrentAccountNameFromRaw,migrateLegacyImportedAssignments,normaliseDB,
 }=PocketLedgerModel.create({
   getDB:()=>DB,uid,clamp,buildEmptyDB,defaultCategories:DEFAULT_CATEGORIES,
-  normaliseRules:PocketLedgerRules.normaliseRules,schemaVersion:SCHEMA_VERSION,appVersion:APP_VERSION,
+  normaliseRules:PocketLedgerRules.normaliseRules,schemaVersion:SCHEMA_VERSION,appVersion:APP_VERSION,money:Money,
 });
 
 function buildSeedDB(){
@@ -162,6 +164,9 @@ function buildSeedDB(){
     pendingCards: [],
     reconciliations: {},
     lastBackupAt: null,
+    lastImport: null,
+    importSessions: [],
+    importProfiles: [],
     netWorthSnapshots: [],
     investmentValuations: [],
   };
@@ -191,6 +196,9 @@ function buildEmptyDB(){
     pendingCards: [],
     reconciliations: {},
     lastBackupAt: null,
+    lastImport: null,
+    importSessions: [],
+    importProfiles: [],
     netWorthSnapshots: [],
     investmentValuations: [],
   };
@@ -456,6 +464,7 @@ const UI = {
   reconcileStartDate: '',
   reconcileDate: todayISO(),
   reconcileStatementBalance: '',
+  reconcileImportSessionId: '',
   reconcileWarningsAcknowledged: false,
   lastUndo: null,
 };

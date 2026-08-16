@@ -20,8 +20,9 @@
     const moneyIn=find(['moneyin','creditamount','paidin','credit']);
     const moneyOut=find(['moneyout','debitamount','paidout','debit']);
     const amount=find(['amount','value','transactionamount']);
+    const balance=find(['runningbalance','accountbalance','balance']);
     const mode=(moneyIn||moneyOut)&&!amount?'split':'single';
-    return {date,description,mode,amount:amount||'',moneyIn:moneyIn||'',moneyOut:moneyOut||''};
+    return {date,description,mode,amount:amount||'',moneyIn:moneyIn||'',moneyOut:moneyOut||'',balance:balance||''};
   }
 
   function parseCsvText(text,hasHeader,parseCsv){
@@ -34,6 +35,21 @@
     if(hasHeader)rows=rows.slice(1);
     rows=rows.filter(row=>Array.isArray(row)&&row.some(cell=>String(cell||'').trim()!==''));
     return {headers,rows,mapping:guessMapping(headers)};
+  }
+
+  function headerSignature(headers){
+    return (headers||[]).map(header=>String(header||'').trim().toLowerCase().replace(/\s+/g,' ')).join('\u001f');
+  }
+
+  async function fingerprintBuffer(buffer,cryptoImpl){
+    const bytes=new Uint8Array(buffer),cryptoApi=cryptoImpl||global.crypto;
+    if(cryptoApi&&cryptoApi.subtle&&typeof cryptoApi.subtle.digest==='function'){
+      const digest=await cryptoApi.subtle.digest('SHA-256',bytes);
+      return [...new Uint8Array(digest)].map(value=>value.toString(16).padStart(2,'0')).join('');
+    }
+    let hash=2166136261;
+    bytes.forEach(value=>{hash^=value;hash=Math.imul(hash,16777619);});
+    return `fnv1a-${(hash>>>0).toString(16).padStart(8,'0')}-${bytes.length}`;
   }
 
   function parseMoney(value){
@@ -85,24 +101,46 @@
       const moneyOut=moneyOutIndex>-1?parseMoney(row[moneyOutIndex]):0;
       amount=moneyIn-Math.abs(moneyOut);
     }
-    return {date,description,amount};
+    const balanceIndex=headerIndex(state.mapping.balance),balance=balanceIndex>-1&&String(row[balanceIndex]||'').trim()!==''?parseMoney(row[balanceIndex]):null;
+    return {date,description,amount,balance};
   }
 
-  function duplicateKey(transaction){
-    return `${transaction.date}|${String(transaction.description||'').trim().toUpperCase()}|${Number(transaction.amount||0).toFixed(2)}`;
+  function duplicateKey(transaction,accountReference){
+    const account=accountReference||transaction.accountId||transaction.account||'';
+    return `${account}|${transaction.date}|${String(transaction.description||'').trim().toUpperCase()}|${Number(transaction.amount||0).toFixed(2)}`;
   }
 
-  function buildParsedRows(state,transactions,suggestCategory,localISODate){
-    const existingKeys=new Set((transactions||[]).map(duplicateKey));
+  function buildParsedRows(state,transactions,suggestCategory,localISODate,options){
+    const opts=options||{},accountReference=opts.accountId||opts.accountName||state.destinationAccount||'';
+    const existingKeys=new Map();
+    (transactions||[]).forEach(transaction=>{
+      const transactionAccount=transaction.accountId||transaction.account||'';
+      if(accountReference&&transactionAccount!==accountReference&&transaction.account!==opts.accountName)return;
+      const key=duplicateKey(transaction,accountReference||transactionAccount),rows=existingKeys.get(key)||[];rows.push(transaction);existingKeys.set(key,rows);
+    });
     return state.rows.map((row,index)=>{
       const parsed=parseImportRow(row,state,localISODate);if(!parsed)return null;
-      const duplicate=existingKeys.has(duplicateKey(parsed));
+      const rowNumber=index+(state.hasHeader?2:1);
+      const provenanceMatch=(transactions||[]).find(transaction=>{
+        const source=transaction.importProvenance;
+        return source&&state.fileFingerprint&&source.fileFingerprint===state.fileFingerprint&&Number(source.rowNumber)===rowNumber&&(!opts.accountId||transaction.accountId===opts.accountId);
+      });
+      const contentMatch=(existingKeys.get(duplicateKey(parsed,accountReference))||[])[0]||null;
+      const matched=provenanceMatch||contentMatch,duplicate=!!matched;
       return {
-        rowId:`imp_${index}`,date:parsed.date,description:parsed.description,amount:parsed.amount,
-        category:suggestCategory(parsed.description,parsed.amount),duplicate,include:!duplicate,
+        rowId:`imp_${index}`,date:parsed.date,description:parsed.description,amount:parsed.amount,balance:parsed.balance,
+        category:suggestCategory(parsed.description,parsed.amount),duplicate,duplicateReason:provenanceMatch?'same-source-row':contentMatch?'same-account-match':'',
+        matchedTransactionId:matched&&matched.id||'',include:!duplicate,rowNumber,rawRow:row.map(value=>String(value==null?'':value)),
       };
     }).filter(Boolean);
   }
 
-  global.PocketLedgerImport={decodeSmart,guessMapping,parseCsvText,parseMoney,parseAnyDate,parseImportRow,duplicateKey,buildParsedRows};
+  function statementClosingBalance(rows){
+    const valid=(rows||[]).filter(row=>row.date&&Number.isFinite(row.balance));if(!valid.length)return null;
+    const dates=valid.map(row=>row.date),endDate=dates.slice().sort().pop(),endRows=valid.filter(row=>row.date===endDate);
+    const orderedDates=(rows||[]).filter(row=>row.date).map(row=>row.date),ascending=orderedDates.length<2||orderedDates[0]<=orderedDates[orderedDates.length-1];
+    return Number((ascending?endRows[endRows.length-1]:endRows[0]).balance);
+  }
+
+  global.PocketLedgerImport={decodeSmart,guessMapping,parseCsvText,headerSignature,fingerprintBuffer,parseMoney,parseAnyDate,parseImportRow,duplicateKey,buildParsedRows,statementClosingBalance};
 })(window);

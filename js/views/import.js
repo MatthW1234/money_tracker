@@ -6,10 +6,13 @@ function newImportState(){
   return {
     step: 1,
     fileName: '',
+    fileFingerprint: '',
+    headerSignature: '',
+    profileId: '',
     headers: [],
     rows: [],
     hasHeader: true,
-    mapping: {date:'', description:'', mode:'single', amount:'', moneyIn:'', moneyOut:''},
+    mapping: {date:'', description:'', mode:'single', amount:'', moneyIn:'', moneyOut:'', balance:''},
     negativeIsOutgoing: true,
     dateFormat: 'DMY',
     parsed: [],
@@ -48,6 +51,7 @@ function renderWizardStep(){
 
 function renderImportStep1(body){
   const li = DB.lastImport;
+  const sessions=(DB.importSessions||[]).slice().sort((a,b)=>String(b.importedAt).localeCompare(String(a.importedAt))).slice(0,5);
   const importAccounts=activeAccountNames().filter(name=>!isLegacyImportedAccount(name));
   if(!importAccounts.includes(UI.importState.destinationAccount))UI.importState.destinationAccount=preferredImportAccountName();
   const lastImportNote = li ? `
@@ -75,6 +79,7 @@ function renderImportStep1(body){
         ${importAccounts.length?`<select id="import-account">${importAccounts.map(a=>`<option value="${escAttr(a)}" ${a===UI.importState.destinationAccount?'selected':''}>${escHTML(a)}</option>`).join('')}</select>`:`<div style="padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--gold-wash);color:var(--gold);font-size:12px;">Add a real account before importing. Pocket Ledger will no longer create a generic Imported account.</div><button class="btn btn-sm" id="import-add-account" style="margin-top:8px;">${iconPlus()} Add account</button>`}
         <span style="font-size:11px;color:var(--ink-faint);">Every transaction in this statement will be assigned to this account. Add and rename accounts under Settings.</span>
       </div>
+      ${sessions.length?`<div class="panel" style="background:var(--surface-2);margin-top:18px;"><div class="panel-head"><div class="panel-title">Import history<small>Every retained import can be traced back to its source file and rows</small></div></div>${sessions.map(session=>`<div class="movers-row"><span class="movers-desc">${escHTML(session.fileName)}<br><span style="font-size:10.5px;color:var(--ink-faint);">${escHTML(session.accountName)} · ${session.startDate&&session.endDate?`${ukDateShort(session.startDate)} – ${ukDateShort(session.endDate)} · `:''}${session.importedCount} added · ${session.duplicateCount} duplicate${session.duplicateCount===1?'':'s'} skipped</span></span><span class="stamp-mini">${new Date(session.importedAt).toLocaleDateString('en-GB')}</span><button class="row-icon-btn" data-import-session="${session.id}" title="Inspect import">${iconAudit()}</button></div>`).join('')}</div>`:''}
     </div>
   `;
   const dz = document.getElementById('dropzone');
@@ -93,6 +98,7 @@ function renderImportStep1(body){
   const importAccount=document.getElementById('import-account');
   if(importAccount)importAccount.addEventListener('change', e=>{ UI.importState.destinationAccount=e.target.value; });
   const addAccount=document.getElementById('import-add-account');if(addAccount)addAccount.onclick=()=>openAccountModal(null);
+  body.querySelectorAll('[data-import-session]').forEach(button=>{button.onclick=()=>openImportSessionModal(button.dataset.importSession);});
 }
 function iconUpload(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`; }
 
@@ -101,10 +107,16 @@ async function handleFile(file){
   st.fileName = file.name;
   try{
     const buf = await file.arrayBuffer();
+    st.fileFingerprint=await ImportEngine.fingerprintBuffer(buf);
     const text=ImportEngine.decodeSmart(buf);
     const parsed=ImportEngine.parseCsvText(text,st.hasHeader,csvText=>Papa.parse(csvText,{skipEmptyLines:true}));
     if(!parsed.rows.length){toast('Could not read any rows from that file','error');return;}
-    st.headers=parsed.headers;st.rows=parsed.rows;st.mapping=parsed.mapping;
+    st.headers=parsed.headers;st.rows=parsed.rows;st.mapping=parsed.mapping;st.headerSignature=ImportEngine.headerSignature(parsed.headers);
+    const record=accountRecordFor(st.destinationAccount),profile=(DB.importProfiles||[]).find(item=>item.accountId===(record&&record.id)&&item.headerSignature===st.headerSignature&&item.hasHeader===st.hasHeader);
+    if(profile){
+      const mapped=Object.assign({},profile.mapping),valid=['date','description','amount','moneyIn','moneyOut','balance'].every(key=>!mapped[key]||st.headers.includes(mapped[key]));
+      if(valid){st.mapping=mapped;st.dateFormat=profile.dateFormat;st.negativeIsOutgoing=profile.negativeIsOutgoing;st.profileId=profile.id;}
+    }
     st.step = 2;
     renderImport(document.getElementById('content'));
     toast(`Loaded ${st.rows.length} rows from ${file.name}`);
@@ -118,7 +130,7 @@ function renderImportStep2(body){
   const opts = (sel)=> `<option value="">— not in file —</option>` + st.headers.map(h=>`<option value="${escAttr(h)}" ${h===sel?'selected':''}>${escHTML(h)}</option>`).join('');
   body.innerHTML = `
     <div class="panel">
-      <div class="panel-head"><div class="panel-title">Match your columns<small>${escHTML(st.fileName)} · ${st.rows.length} rows · we've guessed based on your headers</small></div></div>
+      <div class="panel-head"><div class="panel-title">Match your columns<small>${escHTML(st.fileName)} · ${st.rows.length} rows · ${st.profileId?'saved mapping profile applied':'we have guessed based on your headers'}</small></div></div>
       <div class="mapping-grid">
         <div class="field"><label>Date column</label><select id="map-date">${opts(st.mapping.date)}</select></div>
         <div class="field"><label>Date format</label><select id="map-dateformat">
@@ -133,6 +145,7 @@ function renderImportStep2(body){
         </select></div>
       </div>
       <div id="map-amount-fields" style="margin-top:14px;"></div>
+      <div class="field" style="margin-top:12px;max-width:260px;"><label>Running balance column <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><select id="map-balance">${opts(st.mapping.balance||'')}</select><span style="font-size:10.5px;color:var(--ink-faint);">If present, the closing balance can be carried into reconciliation.</span></div>
       <div class="field" style="margin-top:6px;max-width:340px;" id="neg-toggle-wrap"></div>
       <div class="panel" style="background:var(--surface-2); margin-top:16px;">
         <div class="panel-title" style="font-size:13px;margin-bottom:8px;">Preview (first 4 rows)</div>
@@ -164,8 +177,8 @@ function renderImportStep2(body){
   }
   function renderPreview(){
     const sample = st.rows.slice(0,4).map(r=> parseImportRow(r, st));
-    document.getElementById('map-preview').innerHTML = `<table><thead><tr><th>Date</th><th>Description</th><th style="text-align:right">Amount</th></tr></thead><tbody>${
-      sample.map(s=> s ? `<tr><td>${s.date?ukDate(s.date):'<span style=\"color:var(--expense)\">invalid</span>'}</td><td class="desc">${escHTML(s.description)}</td><td class="amt ${s.amount>0?'income':''}">${gbp(s.amount,{signed:true})}</td></tr>` : '').join('')
+    document.getElementById('map-preview').innerHTML = `<table><thead><tr><th>Date</th><th>Description</th><th style="text-align:right">Amount</th>${st.mapping.balance?'<th style="text-align:right">Balance</th>':''}</tr></thead><tbody>${
+      sample.map(s=> s ? `<tr><td>${s.date?ukDate(s.date):'<span style=\"color:var(--expense)\">invalid</span>'}</td><td class="desc">${escHTML(s.description)}</td><td class="amt ${s.amount>0?'income':''}">${gbp(s.amount,{signed:true})}</td>${st.mapping.balance?`<td class="amt">${Number.isFinite(s.balance)?gbp(s.balance):'—'}</td>`:''}</tr>` : '').join('')
     }</tbody></table>`;
   }
   renderAmountFields();
@@ -174,6 +187,7 @@ function renderImportStep2(body){
   document.getElementById('map-dateformat').onchange = e=>{ st.dateFormat = e.target.value; renderPreview(); };
   document.getElementById('map-desc').onchange = e=>{ st.mapping.description = e.target.value; renderPreview(); };
   document.getElementById('map-mode').onchange = e=>{ st.mapping.mode = e.target.value; renderAmountFields(); renderPreview(); };
+  document.getElementById('map-balance').onchange = e=>{ st.mapping.balance=e.target.value;renderPreview(); };
   document.getElementById('btn-back1').onclick = ()=>{ st.step=1; renderImport(document.getElementById('content')); };
   document.getElementById('btn-to-review').onclick = ()=>{
     if(!st.mapping.date || !st.mapping.description || (st.mapping.mode==='single' ? !st.mapping.amount : (!st.mapping.moneyIn && !st.mapping.moneyOut))){
@@ -189,7 +203,8 @@ function parseImportRow(row,state){return ImportEngine.parseImportRow(row,state,
 
 function buildParsedRows(){
   const st = UI.importState;
-  st.parsed=ImportEngine.buildParsedRows(st,DB.transactions,suggestCategory,localISODate);
+  const record=accountRecordFor(st.destinationAccount);
+  st.parsed=ImportEngine.buildParsedRows(st,DB.transactions,suggestCategory,localISODate,{accountId:record&&record.id,accountName:st.destinationAccount});
 }
 
 function renderImportStep3(body){
@@ -310,30 +325,55 @@ function confirmImport(){
   if(!destinationRecord||destinationRecord.archived||isLegacyImportedAccount(destinationAccount)){toast('Choose an active account from Settings before importing','error');return;}
   const toImport = st.parsed.filter(p=>p.include && p.date);
   if(!toImport.length){ toast('No rows selected to import', 'error'); return; }
-  const learnedRules = [];
+  const learnedRules = [],sessionId=uid('import'),importedAt=new Date().toISOString(),transactionIds=[];
+  if(!DB.importProfiles)DB.importProfiles=[];
+  let profile=DB.importProfiles.find(item=>item.id===st.profileId)||DB.importProfiles.find(item=>item.accountId===destinationRecord.id&&item.headerSignature===st.headerSignature&&item.hasHeader===st.hasHeader);
+  if(!profile){profile={id:uid('profile'),name:`${destinationAccount} CSV`,accountId:destinationRecord.id,accountName:destinationAccount};DB.importProfiles.push(profile);}
+  Object.assign(profile,{accountId:destinationRecord.id,accountName:destinationAccount,headerSignature:st.headerSignature,mapping:Object.assign({},st.mapping),dateFormat:st.dateFormat,negativeIsOutgoing:st.negativeIsOutgoing,hasHeader:st.hasHeader,updatedAt:importedAt});
+  const headerIndex=name=>st.headers.indexOf(name),rawValue=(row,name)=>{const index=headerIndex(name);return index<0?'':String(row.rawRow[index]||'');};
   toImport.forEach(p=>{
     const t = {
       id: uid('tx'), date:p.date, description:p.description, amount:p.amount,
-      category:p.category||'', account:destinationAccount, notes:'', source:'import', status:'cleared'
+      category:p.category||'', account:destinationAccount,accountId:destinationRecord.id, notes:'', source:'import', status:'cleared',
+      importProvenance:{
+        sessionId,fileName:st.fileName,fileFingerprint:st.fileFingerprint,rowNumber:p.rowNumber,
+        rawDate:rawValue(p,st.mapping.date),rawDescription:rawValue(p,st.mapping.description),
+        rawAmount:st.mapping.mode==='single'?rawValue(p,st.mapping.amount):`${rawValue(p,st.mapping.moneyIn)} | ${rawValue(p,st.mapping.moneyOut)}`,
+        rawRow:p.rawRow.slice(),importedAt,profileId:profile.id,
+      },
     };
-    DB.transactions.push(t);
+    DB.transactions.push(t);p.importedTransactionId=t.id;transactionIds.push(t.id);
     if(st.rememberRules){
       const learned = learnRuleFromTransaction(t);
       if(learned) learnedRules.push(learned);
     }
   });
   DB.transactions.sort((a,b)=> a.date.localeCompare(b.date));
+  const validDates=st.parsed.filter(p=>p.date).map(p=>p.date).sort();
+  const session={
+    id:sessionId,fileName:st.fileName,fileFingerprint:st.fileFingerprint,importedAt,accountId:destinationRecord.id,accountName:destinationAccount,
+    profileId:profile.id,headerSignature:st.headerSignature,mapping:Object.assign({},st.mapping),dateFormat:st.dateFormat,negativeIsOutgoing:st.negativeIsOutgoing,hasHeader:st.hasHeader,
+    totalRows:st.parsed.length,importedCount:toImport.length,duplicateCount:st.parsed.filter(p=>p.duplicate&&!p.include).length,
+    excludedCount:st.parsed.filter(p=>p.date&&!p.duplicate&&!p.include).length,invalidCount:st.parsed.filter(p=>!p.date).length,
+    startDate:validDates[0]||'',endDate:validDates[validDates.length-1]||'',transactionIds,
+    closingBalance:ImportEngine.statementClosingBalance(st.parsed),
+    rows:st.parsed.map(p=>({rowNumber:p.rowNumber,status:!p.date?'invalid':p.include?'imported':p.duplicate?'duplicate':'excluded',transactionId:p.importedTransactionId||p.matchedTransactionId||'',date:p.date||'',description:p.description,amount:p.amount})),
+  };
+  if(!DB.importSessions)DB.importSessions=[];DB.importSessions.push(session);
   const mostRecent = toImport.reduce((best,p)=> (!best || p.date > best.date) ? p : best, null);
   DB.lastImport = {
-    timestamp: new Date().toISOString(),
+    timestamp: importedAt,
     fileName: st.fileName,
     count: toImport.length,
     account: destinationAccount,
+    accountId:destinationRecord.id,
+    sessionId,
     lastTx: mostRecent ? {date: mostRecent.date, description: mostRecent.description, amount: mostRecent.amount} : null,
   };
   scheduleSave();
   st.step = 4;
   st.importedCount = toImport.length;
+  st.importSessionId=sessionId;
   st.learnedRules = learnedRules;
   renderImport(document.getElementById('content'));
   renderSidebarBits();
@@ -345,7 +385,7 @@ function renderImportStep4(body){
     <div class="empty-state panel" style="padding:60px 20px;">
       <svg viewBox="0 0 24 24" fill="none" stroke="var(--income)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
       <h4>Import complete</h4>
-      <p>${st.importedCount} transaction${st.importedCount===1?'':'s'} added to your ledger.</p>
+      <p>${st.importedCount} transaction${st.importedCount===1?'':'s'} added to your ledger. The source file and original row are retained for audit and reconciliation.</p>
       ${learned.length ? `
         <div style="text-align:left; max-width:420px; margin:16px auto 0; background:var(--surface-2); border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px;">
           <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:6px;">Learned ${learned.length} new auto-tagging rule${learned.length===1?'':'s'} from your category choices:</div>
@@ -362,3 +402,18 @@ function renderImportStep4(body){
   document.getElementById('btn-goto-tx').onclick = ()=>{ document.querySelector('[data-tab="transactions"]').click(); };
 }
 
+function openImportSessionModal(id){
+  const session=(DB.importSessions||[]).find(item=>item.id===id);if(!session)return;
+  const rows=Array.isArray(session.rows)?session.rows:[],fingerprint=String(session.fileFingerprint||'');
+  openModal(`<div class="modal-head"><h3>Import audit</h3></div><div class="modal-body">
+    <p style="margin:0 0 12px;color:var(--ink-soft);font-size:13px;"><strong>${escHTML(session.fileName)}</strong><br>${escHTML(session.accountName)} · ${new Date(session.importedAt).toLocaleString('en-GB')}</p>
+    <div class="qc-line"><span>Rows read</span><span class="num">${session.totalRows}</span></div>
+    <div class="qc-line"><span>Transactions added</span><span class="num">${session.importedCount}</span></div>
+    <div class="qc-line"><span>Duplicates linked and skipped</span><span class="num">${session.duplicateCount}</span></div>
+    <div class="qc-line"><span>Excluded / invalid</span><span class="num">${session.excludedCount} / ${session.invalidCount}</span></div>
+    <div class="qc-line"><span>Statement range</span><span>${session.startDate&&session.endDate?`${ukDate(session.startDate)} – ${ukDate(session.endDate)}`:'Not available'}</span></div>
+    <p style="font-size:10.5px;color:var(--ink-faint);margin:12px 0 0;word-break:break-all;">File fingerprint: ${escHTML(fingerprint||'Legacy import — no fingerprint')}</p>
+    ${rows.length?`<div class="table-wrap" style="max-height:230px;margin-top:12px;"><table><thead><tr><th>Row</th><th>Status</th><th>Date</th><th>Description</th><th style="text-align:right">Amount</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${row.rowNumber}</td><td><span class="stamp-mini">${escHTML(row.status)}</span></td><td>${row.date?ukDateShort(row.date):'—'}</td><td class="desc">${escHTML(row.description)}</td><td class="amt ${row.amount>0?'income':''}">${gbp(row.amount,{signed:true})}</td></tr>`).join('')}</tbody></table></div>`:''}
+  </div><div class="modal-foot"><button class="btn btn-primary" id="m-close">Close</button></div>`);
+  document.getElementById('m-close').onclick=closeModal;
+}

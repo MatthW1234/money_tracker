@@ -3,13 +3,14 @@
    ========================================================= */
 function healthSeverityLabel(severity){return severity==='error'?'Needs attention':severity==='warning'?'Review':'Information';}
 function healthSeverityColor(severity){return severity==='error'?'var(--expense)':severity==='warning'?'var(--gold)':'var(--brand)';}
-function healthSectionLabel(section){return ({accounts:'Accounts',transactions:'Transactions',transfers:'Transfers',reconciliation:'Reconciliation',rules:'Rules',investments:'Investments'})[section]||section;}
+function healthSectionLabel(section){return ({accounts:'Accounts',transactions:'Transactions',imports:'Imports',transfers:'Transfers',reconciliation:'Reconciliation',rules:'Rules',investments:'Investments'})[section]||section;}
 function healthActionLabel(item){
   if(item.code==='exact-duplicate')return 'Review duplicates';
   if(item.code==='uncategorised-spending')return 'Review spending';
   if(item.section==='reconciliation'&&item.account)return 'Open reconciliation';
   if(item.section==='investments'&&item.account)return 'Update value';
   if(item.section==='rules')return 'Review rules';
+  if(item.section==='imports')return 'Open imports';
   if(item.transactionIds&&item.transactionIds.length)return 'Open transaction';
   return '';
 }
@@ -25,11 +26,12 @@ function runHealthAction(item){
     const record=accountRecordFor(item.account);openInvestmentValuationModal(null,record&&record.id);return;
   }
   if(item.section==='rules'){setTab('categories');return;}
+  if(item.section==='imports'){setTab('import');return;}
   if(item.transactionIds&&item.transactionIds.length)openTxModal(item.transactionIds[0]);
 }
 function renderHealth(c){
   const report=PocketLedgerDiagnostics.auditLedger(DB,{today:todayISO()});
-  const sections=['accounts','transactions','transfers','reconciliation','rules','investments'];
+  const sections=['accounts','transactions','imports','transfers','reconciliation','rules','investments'];
   c.innerHTML=`
     <div class="kpi-row" style="margin-bottom:16px;">
       <div class="kpi-card"><div class="kpi-label">Needs attention</div><div class="kpi-value num" style="color:${report.summary.error?'var(--expense)':'var(--income)'};">${report.summary.error}</div><div class="kpi-sub">Structural or reconciliation problems</div></div>
@@ -38,7 +40,7 @@ function renderHealth(c){
       <div class="kpi-card"><div class="kpi-label">Overall status</div><div class="kpi-value" style="font-size:22px;color:${report.ok?'var(--income)':'var(--expense)'};">${report.ok?'Healthy':'Check items'}</div><div class="kpi-sub">Read-only scan · nothing changed</div></div>
     </div>
     <div class="panel" style="margin-bottom:16px;">
-      <div class="panel-head"><div class="panel-title">What this checks<small>Account assignments, transfer pairs, duplicates, reconciliation anchors, rules and investment valuations</small></div></div>
+      <div class="panel-head"><div class="panel-title">What this checks<small>Account assignments, imports, transfer pairs, duplicates, reconciliation anchors, rules and investment valuations</small></div></div>
       <p style="margin:0;color:var(--ink-soft);font-size:12.5px;line-height:1.6;">These checks never edit transactions. Information items can describe expected historical records, such as activity retained on an archived account. Resolve red items first, then review amber items.</p>
     </div>
     ${sections.map(section=>{

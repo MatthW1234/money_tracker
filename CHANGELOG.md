@@ -1,5 +1,51 @@
 # Pocket Ledger changelog
 
+## 1.25 — statement-assisted reconciliation
+
+- Advanced the ledger schema from 13 to 14 and connected retained import
+  sessions to the five-stage reconciliation workflow.
+- Reconciliation can now select an imported statement, fill its date range and
+  use a mapped running-balance column to prefill the closing balance.
+- The Match entries stage separates linked statement rows, ledger-only entries
+  and statement-only rows before making any status changes.
+- An explicit, confirmed Apply matches action marks linked rows Cleared and
+  unmatched ledger entries Pending; previously reconciled records remain locked
+  and every checkbox can still be reviewed manually.
+- Completed audit records retain the statement file identity and matching
+  counts. Reopening restores the same statement source.
+- Data Health detects missing statement sources and reconciliations completed
+  with unmatched statement rows.
+
+## 1.24 — import provenance and history
+
+- Advanced the ledger schema from 12 to 13 and introduced persistent import
+  sessions and account-specific CSV mapping profiles.
+- Every newly imported transaction retains its import-session ID, source file
+  fingerprint, original row number and raw mapped values for later audit.
+- Duplicate detection now respects the destination account and can recognise a
+  previously imported source row even if its ledger description was edited.
+- The Import screen shows recent sessions with row-level outcomes for imported,
+  duplicate, excluded and invalid rows.
+- Reusing the same statement format and account automatically restores the last
+  successful column mapping, date format and amount-direction setting.
+- Data Health reports repeated source rows, missing import sessions and deleted
+  transactions referenced by import history. Older imports remain valid and are
+  explicitly identified as having no source-row provenance.
+
+## 1.23 — accuracy foundations
+
+- Advanced the ledger schema from 11 to 12 and added a shared penny-precision
+  money engine for stored amounts, balance calculations, investment totals,
+  transfers and reconciliation differences.
+- Made stable account IDs authoritative during restore and save. Account names
+  are refreshed from their account record, so renaming an account cannot leave
+  transactions attached to an obsolete display name.
+- Data Health now detects duplicate account names or IDs, orphaned and
+  mismatched account references, duplicate transaction IDs and split totals
+  that do not equal their parent transaction.
+- Existing schema-11 backups migrate without changing transaction counts,
+  categorisation rules, reconciliation snapshots or investment history.
+
 ## 1.22 — audit-quality reconciliation history
 
 - Advanced the ledger schema from 10 to 11 with automatic normalisation of
