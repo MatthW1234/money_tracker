@@ -345,9 +345,10 @@ function renderManagedRecurring(){
   }
   host.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Name</th><th>Frequency</th><th>Next date</th><th>Status</th><th style="text-align:right;">Expected</th><th></th></tr></thead><tbody>${items.map(item=>{
     const overdue=item.status==='active'&&item.nextDate<todayISO();
+    const matchState=PocketLedgerRecurringMatch.status(item,DB.transactions,todayISO());
     const range=item.variable&&(item.minAmount!=null||item.maxAmount!=null)
       ? `<div style="font-size:10.5px;color:var(--ink-faint);">${item.minAmount!=null?gbp(item.minAmount):'—'}–${item.maxAmount!=null?gbp(item.maxAmount):'—'}</div>`:'';
-    const statusLabel=overdue?'Overdue':item.status[0].toUpperCase()+item.status.slice(1);
+    const statusLabel=matchState.best?`${matchState.matches.length} possible match${matchState.matches.length===1?'':'es'}`:overdue?'Missed / overdue':item.status[0].toUpperCase()+item.status.slice(1);
     const statusClass=overdue?'status-pending':item.status==='active'?'status-cleared':'status-reconciled';
     return `<tr>
       <td class="desc"><strong>${escHTML(item.name)}</strong><div style="font-size:10.5px;color:var(--ink-faint);">${escHTML(item.category||'Uncategorised')}${item.account?` · ${escHTML(item.account)}`:''}${item.variable?' · variable':''}</div></td>
@@ -356,6 +357,7 @@ function renderManagedRecurring(){
       <td><span class="status-pill ${statusClass}">${statusLabel}</span></td>
       <td class="amt num" style="color:${item.kind==='income'?'var(--income)':'var(--ink)'}">${item.kind==='income'?'+':'−'}${gbp(item.amount)}${range}</td>
       <td class="row-actions">
+        ${item.status==='active'&&matchState.best?`<button class="row-icon-btn" data-action="rec-match" data-id="${item.id}" title="Match an existing transaction">${iconLink()}</button>`:''}
         ${item.status==='active'?`<button class="row-icon-btn" data-action="rec-occurred" data-id="${item.id}" title="Record occurrence">${iconCheck()}</button><button class="row-icon-btn" data-action="rec-skip" data-id="${item.id}" title="Skip this occurrence">${iconChevronRight()}</button>`:''}
         ${item.status!=='ended'?`<button class="row-icon-btn" data-action="rec-pause" data-id="${item.id}" title="${item.status==='paused'?'Resume':'Pause'}">${item.status==='paused'?iconPlay():iconPause()}</button>`:''}
         <button class="row-icon-btn" data-action="rec-edit" data-id="${item.id}" title="Edit">${iconEdit()}</button>
@@ -364,6 +366,7 @@ function renderManagedRecurring(){
     </tr>`;
   }).join('')}</tbody></table></div>`;
   host.querySelectorAll('[data-action="rec-edit"]').forEach(b=>b.onclick=()=>openRecurringModal(b.dataset.id));
+  host.querySelectorAll('[data-action="rec-match"]').forEach(b=>b.onclick=()=>openRecurringMatchModal(b.dataset.id));
   host.querySelectorAll('[data-action="rec-occurred"]').forEach(b=>b.onclick=()=>openRecurringOccurrenceModal(b.dataset.id));
   host.querySelectorAll('[data-action="rec-skip"]').forEach(b=>b.onclick=()=>confirmSkipRecurring(b.dataset.id));
   host.querySelectorAll('[data-action="rec-pause"]').forEach(b=>b.onclick=()=>toggleRecurringPause(b.dataset.id));
@@ -433,6 +436,12 @@ function advanceRecurringItem(item,throughDate){
   while(next<=throughDate&&guard++<120)next=advanceRecurringDate(item,next);
   item.nextDate=next;if(item.endDate&&item.nextDate>item.endDate)item.status='ended';
 }
+function openRecurringMatchModal(id){
+  const item=(DB.recurringItems||[]).find(row=>row.id===id);if(!item)return;
+  const candidates=PocketLedgerRecurringMatch.candidates(item,DB.transactions);if(!candidates.length){toast('No likely unlinked transaction was found within 10 days','error');return;}
+  openModal(`<div class="modal-head"><h3>Match ${escHTML(item.name)}</h3></div><div class="modal-body"><p style="margin:0 0 12px;color:var(--ink-soft);font-size:12.5px;">Expected ${ukDate(item.nextDate)} · ${gbp(item.amount)}. Confirming links the actual entry and advances the schedule.</p><div class="field"><label>Actual imported transaction</label><select id="rec-match-transaction">${candidates.map(candidate=>`<option value="${candidate.transaction.id}">${ukDate(candidate.transaction.date)} · ${escHTML(candidate.transaction.description)} · ${gbp(Math.abs(candidate.transaction.amount))}${candidate.late?' · late':''}${candidate.changedPrice?' · amount changed':''}</option>`).join('')}</select></div>${candidates.length>1?`<p style="font-size:11px;color:var(--gold);margin:9px 0 0;">${candidates.length} plausible entries were found. Check the account, date and amount before confirming.</p>`:''}</div><div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-confirm">Confirm match</button></div>`);
+  document.getElementById('m-cancel').onclick=closeModal;document.getElementById('m-confirm').onclick=()=>{const transaction=DB.transactions.find(row=>row.id===document.getElementById('rec-match-transaction').value),candidate=candidates.find(row=>row.transaction===transaction);try{const match=PocketLedgerRecurringMatch.link({uid,item,transaction});DB.recurringMatches.push(match);item.lastMatchedDate=transaction.date;advanceRecurringItem(item,transaction.date);scheduleSave();closeModal();renderContent();toast(candidate&&candidate.changedPrice?'Occurrence matched — amount change retained for review':'Occurrence matched and schedule advanced');}catch(error){toast(error.message,'error');}};
+}
 function openRecurringOccurrenceModal(id){
   const item=(DB.recurringItems||[]).find(x=>x.id===id);if(!item)return;
   openModal(`<div class="modal-head"><h3>Record ${item.kind==='income'?'income':'payment'}</h3></div><div class="modal-body">
@@ -446,7 +455,7 @@ function openRecurringOccurrenceModal(id){
     if(add){
       const duplicate=DB.transactions.some(t=>t.recurringItemId===item.id&&t.date===date);
       if(duplicate){toast('That scheduled occurrence is already in Transactions','error');return;}
-      DB.transactions.push({id:uid('tx'),date,description:item.name,amount:item.kind==='income'?amount:-amount,category:item.category,account:item.account,notes:item.notes||'',source:'recurring',status:'cleared',recurringItemId:item.id});
+      const transaction={id:uid('tx'),date,description:item.name,amount:item.kind==='income'?amount:-amount,category:item.category,account:item.account,notes:item.notes||'',source:'recurring',status:'cleared',recurringItemId:item.id};DB.transactions.push(transaction);DB.recurringMatches.push({id:uid('recmatch'),recurringItemId:item.id,transactionId:transaction.id,expectedDate:item.nextDate,actualDate:date,expectedAmount:item.amount,actualAmount:amount,matchedAt:new Date().toISOString(),source:'created'});
     }
     item.lastMatchedDate=date;advanceRecurringItem(item,date);scheduleSave();closeModal();renderContent();toast(add?'Occurrence added to Transactions':'Schedule advanced');
   };
@@ -681,4 +690,3 @@ function openWishModal(id, prefillAmount){
     toast(w?'Wishlist item updated':'Added to wishlist');
   };
 }
-

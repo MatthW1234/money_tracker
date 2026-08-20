@@ -22,6 +22,13 @@
     const accountById=new Map(accounts.map(account=>[account.id,account]));
     const issues=[];
 
+    if(!db.lastBackupAt){
+      issues.push(issue('storage','warning','backup-missing','No backup has been recorded','Export a JSON backup from Settings so the ledger can be recovered if browser storage is cleared.'));
+    }else{
+      const backupTime=Date.parse(db.lastBackupAt),todayTime=Date.parse(`${today}T23:59:59Z`),ageDays=Number.isFinite(backupTime)?Math.floor((todayTime-backupTime)/86400000):Infinity;
+      if(ageDays>30)issues.push(issue('storage','warning','backup-stale','Backup is more than 30 days old',`The last recorded backup is ${ageDays} days old. Export a fresh verified backup from Settings.`));
+    }
+
     const duplicateAccountNames=new Map(),duplicateAccountIds=new Map();
     accounts.forEach(account=>{
       const name=String(account.name||'').trim().toLowerCase(),nameRows=duplicateAccountNames.get(name)||[];nameRows.push(account);duplicateAccountNames.set(name,nameRows);
@@ -70,6 +77,14 @@
     if(repeatedSourceRows.length)issues.push(issue('imports','error','duplicate-source-row','The same statement rows were imported more than once',`${repeatedSourceRows.length} source row${repeatedSourceRows.length===1?' appears':'s appear'} multiple times in the same account.`,{transactionIds:repeatedSourceRows.flatMap(rows=>rows.map(t=>t.id))}));
     const transactionIdSet=new Set(transactions.map(transaction=>transaction.id)),missingSessionLinks=sessions.flatMap(session=>(session.transactionIds||[]).filter(id=>!transactionIdSet.has(id)).map(id=>({session,id})));
     if(missingSessionLinks.length)issues.push(issue('imports','warning','missing-imported-transaction','Import history references deleted transactions',`${missingSessionLinks.length} imported transaction reference${missingSessionLinks.length===1?' is':'s are'} no longer present in the ledger.`));
+
+    const transactionLinks=Array.isArray(db.transactionLinks)?db.transactionLinks:[],transactionById=new Map(transactions.map(transaction=>[transaction.id,transaction]));
+    const brokenLinks=transactionLinks.filter(link=>!transactionById.has(link.originalTransactionId)||!transactionById.has(link.returnTransactionId));
+    if(brokenLinks.length)issues.push(issue('transactions','error','orphan-transaction-link','Refund or reversal links are incomplete',`${brokenLinks.length} linked event${brokenLinks.length===1?' references':'s reference'} a transaction that no longer exists.`));
+    const invalidLinks=transactionLinks.filter(link=>{const original=transactionById.get(link.originalTransactionId),returned=transactionById.get(link.returnTransactionId);return original&&returned&&(original.amount>=0||returned.amount<=0||original.accountId!==returned.accountId);});
+    if(invalidLinks.length)issues.push(issue('transactions','error','invalid-return-link','Refund or reversal links have invalid directions',`${invalidLinks.length} linked event${invalidLinks.length===1?' does':'s do'} not connect an outgoing payment to incoming money on the same account.`));
+    const overReturned=[];new Set(transactionLinks.map(link=>link.originalTransactionId)).forEach(id=>{const original=transactionById.get(id),total=transactionLinks.filter(link=>link.originalTransactionId===id).reduce((sum,link)=>sum+Math.abs(Number((transactionById.get(link.returnTransactionId)||{}).amount)||0),0);if(original&&total>Math.abs(Number(original.amount))+0.005)overReturned.push(original);});
+    if(overReturned.length)issues.push(issue('transactions','warning','return-exceeds-payment','Returned money exceeds the original payment',`${overReturned.length} original payment${overReturned.length===1?' has':'s have'} linked refunds, reversals or chargebacks above its outgoing amount.`,{transactionIds:overReturned.map(transaction=>transaction.id)}));
 
     const adjustments=transactions.filter(transaction=>transaction.isAdjustment||transaction.excluded&&text(transaction.description)==='BALANCE ADJUSTMENT');
     if(adjustments.length)issues.push(issue('reconciliation','info','balance-adjustments','Balance adjustments are present',`${adjustments.length} adjustment${adjustments.length===1?' changes':'s change'} account balances without affecting income or spending. Review these before diagnosing an unexplained difference.`,{transactionIds:adjustments.map(t=>t.id)}));
@@ -146,6 +161,15 @@
       const age=dayDifference(values[0].date,today);
       if(age!=null&&age>35)issues.push(issue('investments','warning','stale-valuation',`${account.name} valuation is ${age} days old`,`Update the total account value from the platform, including invested holdings and uninvested cash.`,{account:account.name,valuationId:values[0].id}));
     });
+    const investmentActivities=Array.isArray(db.investmentActivities)?db.investmentActivities:[],transactionIdLookup=new Set(transactions.map(transaction=>transaction.id));
+    accounts.filter(account=>['investment','pension'].includes(account.type)).forEach(account=>{
+      const unmatched=investmentActivities.filter(activity=>activity.accountId===account.id&&['deposit','withdrawal'].includes(activity.type)&&activity.matchStatus==='unmatched');
+      if(unmatched.length)issues.push(issue('investments','warning','unmatched-provider-funding',`${account.name} has unmatched Trading 212 funding`,`${unmatched.length} deposit or withdrawal row${unmatched.length===1?' does':'s do'} not link to an existing account transfer.`,{account:account.name,investmentActivityIds:unmatched.map(activity=>activity.id)}));
+    });
+    const brokenActivityLinks=investmentActivities.filter(activity=>activity.linkedTransactionId&&!transactionIdLookup.has(activity.linkedTransactionId));
+    if(brokenActivityLinks.length)issues.push(issue('investments','error','missing-provider-transfer','Trading 212 links point to deleted transfers',`${brokenActivityLinks.length} provider activit${brokenActivityLinks.length===1?'y references':'ies reference'} a transaction that no longer exists.`));
+    const activityKeys=new Map();investmentActivities.filter(activity=>activity.activityKey).forEach(activity=>{const rows=activityKeys.get(activity.activityKey)||[];rows.push(activity);activityKeys.set(activity.activityKey,rows);});
+    const duplicateActivities=[...activityKeys.values()].filter(rows=>rows.length>1);if(duplicateActivities.length)issues.push(issue('investments','error','duplicate-provider-activity','Trading 212 activities were imported more than once',`${duplicateActivities.length} provider activity key${duplicateActivities.length===1?' appears':'s appear'} multiple times.`));
 
     const severityOrder={error:0,warning:1,info:2};
     issues.sort((a,b)=>severityOrder[a.severity]-severityOrder[b.severity]||a.section.localeCompare(b.section)||a.title.localeCompare(b.title));

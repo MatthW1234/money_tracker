@@ -4,6 +4,7 @@
 function filteredSortedTx(){
   let list = DB.transactions.slice();
   const f = UI.txFilters;
+  if(f.preset) list=PocketLedgerReview.applyPreset(list,f.preset,todayISO());
   if(f.search){
     const q = f.search.toLowerCase();
     list = list.filter(t=> t.description.toLowerCase().includes(q) || (t.notes||'').toLowerCase().includes(q));
@@ -34,11 +35,23 @@ function filteredSortedTx(){
   });
   return list;
 }
+function txColumnVisible(name){return DB.appPreferences?.transactionColumns?.[name]!==false;}
+function applyTransactionDatePreset(kind){
+  let range;if(kind==='month')range=PocketLedgerPreferences.month(todayISO());else if(kind==='tax-year')range=PocketLedgerPreferences.ukTaxYear(todayISO());else range=PocketLedgerPreferences.statement(DB,UI.reconcileAccount||preferredImportAccountName());
+  if(!range.from&&!range.to){toast('No completed statement period was found for the selected account','error');return;}
+  UI.txFilters.from=range.from;UI.txFilters.to=range.to;UI.txFilters.preset='';UI.selectedSavedViewId='';saveDesktopPreferences();renderTransactions(document.getElementById('content'));
+}
 
 function renderTransactions(c){
   UI.txSelected = new Set();
   const f = UI.txFilters;
   c.innerHTML = `
+    <div class="panel" style="padding:10px 12px;margin-bottom:10px;display:flex;align-items:end;gap:8px;flex-wrap:wrap;">
+      <div class="field" style="min-width:210px;"><label>Saved or quick view</label><select id="tx-view-select"><option value="">Custom filters</option><optgroup label="Quick views"><option value="preset:this-month" ${f.preset==='this-month'?'selected':''}>This month</option><option value="preset:needs-receipt" ${f.preset==='needs-receipt'?'selected':''}>Needs receipt</option><option value="preset:large-card" ${f.preset==='large-card'?'selected':''}>Large card purchases (£100+)</option></optgroup>${DB.savedViews.length?`<optgroup label="My views">${DB.savedViews.map(view=>`<option value="saved:${escAttr(view.id)}" ${UI.selectedSavedViewId===view.id?'selected':''}>${escHTML(view.name)}</option>`).join('')}</optgroup>`:''}</select></div>
+      <button class="btn btn-sm" id="tx-save-view">Save current view</button>
+      <button class="btn btn-sm btn-ghost" id="tx-delete-view" ${UI.selectedSavedViewId?'':'disabled'}>Delete selected view</button>
+      <span style="flex:1"></span><button class="btn btn-sm btn-ghost" data-date-preset="month">This month</button><button class="btn btn-sm btn-ghost" data-date-preset="statement">Last statement</button><button class="btn btn-sm btn-ghost" data-date-preset="tax-year">UK tax year</button>
+    </div>
     <div class="filters-row">
       <div class="field"><label>Search</label><input type="text" class="search-input" id="f-search" placeholder="Description or note…" value="${escAttr(f.search)}"></div>
       <div class="field"><label>Category</label><select id="f-category">
@@ -71,8 +84,8 @@ function renderTransactions(c){
           <th data-col="date">Date</th>
           <th data-col="description">Description</th>
           <th data-col="category">Category</th>
-          <th data-col="account">Account</th>
-          <th data-col="status">Status</th>
+          ${txColumnVisible('account')?'<th data-col="account">Account</th>':''}
+          ${txColumnVisible('status')?'<th data-col="status">Status</th>':''}
           <th data-col="amount" style="text-align:right;">Amount</th>
           <th></th>
         </tr></thead>
@@ -80,6 +93,18 @@ function renderTransactions(c){
       </table>
     </div>
   `;
+  const viewSelect=document.getElementById('tx-view-select'),deleteView=document.getElementById('tx-delete-view');
+  viewSelect.onchange=()=>{
+    const value=viewSelect.value;
+    UI.selectedSavedViewId=value.startsWith('saved:')?value.slice(6):'';
+    if(value.startsWith('preset:'))UI.txFilters={search:'',category:'all',type:'all',status:'all',from:'',to:'',preset:value.slice(7)};
+    else if(value.startsWith('saved:')){const view=DB.savedViews.find(item=>item.id===value.slice(6));if(view)UI.txFilters=Object.assign({search:'',category:'all',type:'all',status:'all',from:'',to:'',preset:''},view.filters);}
+    else UI.txFilters.preset='';
+    renderTransactions(c);updateRecheckButtonLabel();
+  };
+  document.getElementById('tx-save-view').onclick=openSaveTransactionViewModal;
+  c.querySelectorAll('[data-date-preset]').forEach(button=>button.onclick=()=>applyTransactionDatePreset(button.dataset.datePreset));
+  deleteView.onclick=()=>{const id=UI.selectedSavedViewId;DB.savedViews=DB.savedViews.filter(view=>view.id!==id);UI.selectedSavedViewId='';scheduleSave();renderTransactions(c);toast('Saved view deleted');};
   let txFilterDebounce = null;
   const debouncedFilterChange = ()=>{
     clearTimeout(txFilterDebounce);
@@ -90,7 +115,8 @@ function renderTransactions(c){
     document.getElementById(id).addEventListener('change', onTxFilterChange);
   });
   document.getElementById('f-clear').onclick = ()=>{
-    UI.txFilters = {search:'', category:'all', type:'all', status:'all', from:'', to:''};
+    UI.txFilters = {search:'', category:'all', type:'all', status:'all', from:'', to:'', preset:''};
+    UI.selectedSavedViewId='';
     renderTransactions(c);
     updateRecheckButtonLabel();
   };
@@ -99,13 +125,14 @@ function renderTransactions(c){
       if(UI.txSort.col===th.dataset.col) UI.txSort.dir = UI.txSort.dir==='asc'?'desc':'asc';
       else UI.txSort = {col:th.dataset.col, dir:'asc'};
       renderTxBody();
+      saveDesktopPreferences();
       document.querySelectorAll('th[data-col]').forEach(h=>h.classList.remove('sorted'));
       th.classList.add('sorted');
     });
   });
   document.getElementById('tx-select-all').addEventListener('change', (e)=>{
     const visible = filteredSortedTx();
-    if(e.target.checked) visible.filter(t=>transactionStatus(t)!=='reconciled').forEach(t=> UI.txSelected.add(t.id));
+    if(e.target.checked) visible.filter(t=>transactionStatus(t)!=='reconciled'&&!closedPeriodBlocks(t)).forEach(t=> UI.txSelected.add(t.id));
     else visible.forEach(t=> UI.txSelected.delete(t.id));
     renderTxBody();
   });
@@ -113,6 +140,7 @@ function renderTransactions(c){
   txBody.addEventListener('click', handleTxBodyClick);
   txBody.addEventListener('change', handleTxBodyChange);
   renderTxBody();
+  saveDesktopPreferences();
 }
 function onTxFilterChange(){
   UI.txFilters.search = document.getElementById('f-search').value;
@@ -121,8 +149,15 @@ function onTxFilterChange(){
   UI.txFilters.status = document.getElementById('f-status').value;
   UI.txFilters.from = document.getElementById('f-from').value;
   UI.txFilters.to = document.getElementById('f-to').value;
+  UI.txFilters.preset='';
+  UI.selectedSavedViewId='';
   renderTxBody();
   updateRecheckButtonLabel();
+  saveDesktopPreferences();
+}
+function openSaveTransactionViewModal(){
+  openModal(`<div class="modal-head"><h3>Save transaction view</h3></div><div class="modal-body"><div class="field"><label>View name</label><input id="saved-view-name" type="text" maxlength="80" placeholder="e.g. Current statement"></div><p style="font-size:11.5px;color:var(--ink-faint);margin:9px 0 0;">Search, category, type, status and date filters will be retained. The transactions themselves are not copied.</p></div><div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">Save view</button></div>`);
+  document.getElementById('m-cancel').onclick=closeModal;document.getElementById('m-save').onclick=()=>{const name=document.getElementById('saved-view-name').value.trim();if(!name){toast('Enter a view name','error');return;}DB.savedViews.push({id:uid('view'),name,filters:Object.assign({},UI.txFilters,{preset:''}),createdAt:new Date().toISOString()});scheduleSave();closeModal();renderTransactions(document.getElementById('content'));toast('Transaction view saved');};
 }
 function updateRecheckButtonLabel(){
   const btn = document.getElementById('btn-recheck');
@@ -164,7 +199,7 @@ function renderBulkToolbar(){
     const before = [];
     UI.txSelected.forEach(id=>{
       const t = DB.transactions.find(x=>x.id===id);
-      if(t && !t.transferId){ before.push({id:t.id, account:t.account}); t.account = val; count++; }
+      if(t && !t.transferId&&!closedPeriodBlocks(t)){ before.push({id:t.id, account:t.account}); t.account = val; count++; }
     });
     pushUndo(`set account to "${val}" for ${count} transaction${count===1?'':'s'}`, ()=>{
       before.forEach(b=>{ const t = DB.transactions.find(x=>x.id===b.id); if(t) t.account = b.account; });
@@ -180,7 +215,7 @@ function renderBulkToolbar(){
     const before = [];
     UI.txSelected.forEach(id=>{
       const t = DB.transactions.find(x=>x.id===id);
-      if(t && !t.transferId && !(t.splits&&t.splits.length)){
+      if(t && !t.transferId && !(t.splits&&t.splits.length)&&!closedPeriodBlocks(t)){
         before.push({id:t.id, category:t.category});
         t.category = val;
         count++;
@@ -206,7 +241,7 @@ function renderBulkToolbar(){
     const before=[];
     UI.txSelected.forEach(id=>{
       const t=DB.transactions.find(x=>x.id===id);
-      if(t && transactionStatus(t)!=='reconciled'){ before.push({id:t.id,status:t.status});t.status=status; }
+      if(t && transactionStatus(t)!=='reconciled'&&!closedPeriodBlocks(t)){ before.push({id:t.id,status:t.status});t.status=status; }
     });
     pushUndo(`set ${before.length} transaction${before.length===1?'':'s'} to ${status}`,()=>before.forEach(b=>{const t=DB.transactions.find(x=>x.id===b.id);if(t)t.status=b.status;}));
     scheduleSave();UI.txSelected.clear();renderTxBody();offerUndo(`Marked ${before.length} transaction${before.length===1?'':'s'} as ${status}`);
@@ -218,7 +253,7 @@ function renderTxBody(){
   renderBulkToolbar();
   const selectAll = document.getElementById('tx-select-all');
   if(selectAll){
-    const editable = list.filter(t=>transactionStatus(t)!=='reconciled');
+    const editable = list.filter(t=>transactionStatus(t)!=='reconciled'&&!closedPeriodBlocks(t));
     selectAll.checked = editable.length>0 && editable.every(t=> UI.txSelected.has(t.id));
   }
   if(!list.length){
@@ -238,6 +273,8 @@ function handleTxBodyClick(e){
   if(delBtn){ deleteTx(delBtn.dataset.id); return; }
   const convBtn = e.target.closest('[data-action="convert-transfer"]');
   if(convBtn){ openConvertToTransferModal(convBtn.dataset.id); return; }
+  const linkBtn=e.target.closest('[data-action="link-return"]');if(linkBtn){openReturnLinkModal(linkBtn.dataset.id);return;}
+  const unlinkBtn=e.target.closest('[data-action="unlink-return"]');if(unlinkBtn){unlinkReturnEvent(unlinkBtn.dataset.id);return;}
   const revBtn = e.target.closest('[data-action="revert-transfer"]');
   if(revBtn){ revertTransfer(revBtn.dataset.id); return; }
 }
@@ -250,7 +287,7 @@ function handleTxBodyChange(e){
   const selectAll = document.getElementById('tx-select-all');
   if(selectAll){
     const list = filteredSortedTx();
-    const editable = list.filter(t=>transactionStatus(t)!=='reconciled');
+    const editable = list.filter(t=>transactionStatus(t)!=='reconciled'&&!closedPeriodBlocks(t));
     selectAll.checked = editable.length>0 && editable.every(t=> UI.txSelected.has(t.id));
   }
 }
@@ -259,6 +296,7 @@ function openInlineCategoryPicker(badgeEl){
   const t = DB.transactions.find(x=>x.id===id);
   if(!t) return;
   if(transactionStatus(t)==='reconciled'){ toast('Reconciled transactions are locked. Reopen the reconciliation first.', 'error'); return; }
+  if(warnClosedPeriod(t))return;
   const td = badgeEl.closest('td');
   const sel = document.createElement('select');
   sel.className = 'cat-select-inline';
@@ -292,15 +330,15 @@ function openInlineCategoryPicker(badgeEl){
 function rowHTML_tx(t){
   const checked = UI.txSelected.has(t.id) ? 'checked' : '';
   const status = transactionStatus(t);
-  const locked = status==='reconciled';
+  const locked = status==='reconciled'||!!closedPeriodBlocks(t);
   if(t.transferId){
     return `<tr class="transfer-row">
       <td><input type="checkbox" class="tx-row-check" data-id="${t.id}" ${checked} ${locked?'disabled':''}></td>
       <td class="num">${ukDate(t.date)}</td>
       <td class="desc" title="${escAttr(t.description)}">${escHTML(t.description)}</td>
       <td><span class="stamp c-transfer">Transfer</span></td>
-      <td>${escHTML(t.account||'—')}</td>
-      <td>${statusPillHTML(status)}</td>
+      ${txColumnVisible('account')?`<td>${escHTML(t.account||'—')}</td>`:''}
+      ${txColumnVisible('status')?`<td>${statusPillHTML(status)}</td>`:''}
       <td class="amt ${t.amount>0?'income':''}">${gbp(t.amount,{signed:true})}</td>
       <td class="row-actions">
         <button class="row-icon-btn" data-action="revert-transfer" data-id="${t.id}" title="Remove transfer tag and revert to a normal transaction">${iconUndo()}</button>
@@ -315,14 +353,15 @@ function rowHTML_tx(t){
   return `<tr>
     <td><input type="checkbox" class="tx-row-check" data-id="${t.id}" ${checked} ${locked?'disabled':''}></td>
     <td class="num">${ukDate(t.date)}</td>
-    <td class="desc" title="${escAttr(t.description)}">${escHTML(t.description)}${t.excluded ? ' <span class="stamp-mini" title="Not counted in income/spending totals">excl.</span>' : ''}</td>
+    <td class="desc" title="${escAttr(t.description)}">${escHTML(t.description)}${t.excluded ? ' <span class="stamp-mini" title="Not counted in income/spending totals">excl.</span>' : ''}${t.linkedEventType?` <span class="stamp-mini">${escHTML(t.linkedEventType)}</span>`:''}</td>
     <td class="cat-cell"><span class="stamp ${stampClass} cat-badge-clickable" data-action="${isSplit?'open-split':'open-cat-picker'}" data-id="${t.id}" title="${isSplit?'Click to edit split':'Click to change category'}">${escHTML(catLabel)}</span></td>
-    <td>${escHTML(t.account||'—')}</td>
-    <td>${statusPillHTML(status)}</td>
+    ${txColumnVisible('account')?`<td>${escHTML(t.account||'—')}</td>`:''}
+    ${txColumnVisible('status')?`<td>${statusPillHTML(status)}</td>`:''}
     <td class="amt ${t.amount>0?'income':''}">${gbp(t.amount,{signed:true})}</td>
     <td class="row-actions">
       <button class="row-icon-btn" data-action="open-split" data-id="${t.id}" title="${isSplit?'Edit split':'Split across categories'}">${iconSplit()}</button>
       <button class="row-icon-btn" data-action="convert-transfer" data-id="${t.id}" title="Convert to transfer">${iconSwap()}</button>
+      ${t.linkedEventId?`<button class="row-icon-btn" data-action="unlink-return" data-id="${t.id}" title="Remove refund/reversal link">${iconLink()}</button>`:t.amount>0?`<button class="row-icon-btn" data-action="link-return" data-id="${t.id}" title="Link to an original payment">${iconLink()}</button>`:''}
       <button class="row-icon-btn" data-action="edit-tx" data-id="${t.id}" title="Edit">${iconEdit()}</button>
       <button class="row-icon-btn" data-action="delete-tx" data-id="${t.id}" title="Delete">${iconTrash()}</button>
     </td>
@@ -330,6 +369,7 @@ function rowHTML_tx(t){
 }
 function iconSplit(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3v7a4 4 0 0 0 4 4h4"/><path d="M6 21v-7"/><path d="m14 10 4 4-4 4"/></svg>`; }
 function iconSwap(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>`; }
+function iconLink(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg>`;}
 function iconUndo(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-9.36L1 10"/></svg>`; }
 function iconEdit(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>`; }
 function iconTrash(){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>`; }
@@ -338,8 +378,10 @@ function deleteTx(id){
   const t = DB.transactions.find(x=>x.id===id);
   if(!t) return;
   if(transactionStatus(t)==='reconciled'){ toast('Reconciled transactions are locked. Reopen the reconciliation first.', 'error'); return; }
+  if(warnClosedPeriod(t))return;
   const pair = t.transferId ? DB.transactions.find(x=> x.transferId===t.transferId && x.id!==t.id) : null;
   if(pair && transactionStatus(pair)==='reconciled'){ toast('The matching side is reconciled and locked. Reopen that account reconciliation first.', 'error'); return; }
+  if(pair&&warnClosedPeriod(pair))return;
   openModal(`
     <div class="modal-head"><h3>${pair ? 'Delete this transfer?' : 'Delete transaction?'}</h3></div>
     <div class="modal-body">
@@ -351,15 +393,30 @@ function deleteTx(id){
   `);
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('m-confirm').onclick = ()=>{
+    const linked=(DB.transactionLinks||[]).filter(link=>[link.originalTransactionId,link.returnTransactionId].includes(t.id)||(pair&&[link.originalTransactionId,link.returnTransactionId].includes(pair.id)));linked.forEach(link=>PocketLedgerLinkedEvents.removeLink(link,DB.transactions));DB.transactionLinks=(DB.transactionLinks||[]).filter(link=>!linked.includes(link));
     if(pair) DB.transactions = DB.transactions.filter(x=> x.transferId !== t.transferId);
     else DB.transactions = DB.transactions.filter(x=>x.id!==id);
     scheduleSave(); closeModal(); renderContent(); toast(pair ? 'Transfer deleted' : 'Transaction deleted');
   };
 }
+function openReturnLinkModal(id){
+  const returned=DB.transactions.find(transaction=>transaction.id===id);if(!returned||returned.amount<=0||returned.transferId)return;
+  if(transactionStatus(returned)==='reconciled'){toast('Reopen this transaction’s reconciliation before changing its reporting link','error');return;}
+  if(warnClosedPeriod(returned))return;
+  const candidates=PocketLedgerLinkedEvents.suggestOriginals(returned,DB.transactions);if(!candidates.length){toast('No eligible earlier outgoing payment was found on this account','error');return;}
+  openModal(`<div class="modal-head"><h3>Link returned money</h3></div><div class="modal-body"><p style="margin:0 0 12px;color:var(--ink-soft);font-size:12.5px;">${escHTML(returned.description)} · ${ukDate(returned.date)} · ${gbp(returned.amount)}</p><div class="field"><label>What happened?</label><select id="return-type"><option value="refund">Refund</option><option value="reversal">Reversed payment</option><option value="chargeback">Chargeback</option></select></div><div class="field" style="margin-top:10px;"><label>Original payment</label><select id="return-original">${candidates.map(candidate=>`<option value="${escAttr(candidate.transaction.id)}">${ukDate(candidate.transaction.date)} · ${escHTML(candidate.transaction.description)} · ${gbp(Math.abs(candidate.transaction.amount))}${candidate.difference?` · ${gbp(candidate.difference)} partial`:''}</option>`).join('')}</select></div><p style="font-size:11px;color:var(--ink-faint);margin:10px 0 0;">The incoming money will reduce the original spending category instead of being counted as income. The bank balance and both original transactions remain unchanged.</p></div><div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-confirm">Link return</button></div>`);
+  document.getElementById('m-cancel').onclick=closeModal;document.getElementById('m-confirm').onclick=()=>{const original=DB.transactions.find(transaction=>transaction.id===document.getElementById('return-original').value);try{const link=PocketLedgerLinkedEvents.createReturnLink({uid,original,returned,type:document.getElementById('return-type').value});if(!DB.transactionLinks)DB.transactionLinks=[];DB.transactionLinks.push(link);scheduleSave();closeModal();renderContent();toast('Returned money linked to its original payment');}catch(error){toast(error.message,'error');}};
+}
+function unlinkReturnEvent(transactionId){
+  const transaction=DB.transactions.find(row=>row.id===transactionId);if(!transaction||transactionStatus(transaction)==='reconciled'){toast('Reopen this transaction’s reconciliation before removing its link','error');return;}
+  if(warnClosedPeriod(transaction))return;
+  const link=(DB.transactionLinks||[]).find(item=>item.returnTransactionId===transactionId);if(!link)return;PocketLedgerLinkedEvents.removeLink(link,DB.transactions);DB.transactionLinks=DB.transactionLinks.filter(item=>item.id!==link.id);scheduleSave();renderContent();toast('Return link removed');
+}
 function openConvertToTransferModal(id){
   const t = DB.transactions.find(x=>x.id===id);
   if(!t || t.transferId) return;
   if(transactionStatus(t)==='reconciled'){ toast('Reconciled transactions are locked. Reopen the reconciliation first.', 'error'); return; }
+  if(warnClosedPeriod(t))return;
   if(t.splits && t.splits.length){ toast('Remove the split before converting this to a transfer', 'error'); return; }
   const outgoing = t.amount<0;
   const candidates=PocketLedgerTransfers.findCandidates({transactions:DB.transactions,transaction:t,maxDays:3});
@@ -407,8 +464,10 @@ function revertTransfer(id){
   const t = DB.transactions.find(x=>x.id===id);
   if(!t || !t.transferId) return;
   if(transactionStatus(t)==='reconciled'){ toast('Reconciled transactions are locked. Reopen the reconciliation first.', 'error'); return; }
+  if(warnClosedPeriod(t))return;
   const pair = DB.transactions.find(x=> x.transferId===t.transferId && x.id!==t.id);
   if(pair && transactionStatus(pair)==='reconciled'){ toast('The matching side is reconciled and locked. Reopen that account reconciliation first.', 'error'); return; }
+  if(pair&&warnClosedPeriod(pair))return;
   const hadOriginalCategory = t.preTransferCategory !== undefined;
   openModal(`
     <div class="modal-head"><h3>Remove transfer tag?</h3></div>
@@ -434,11 +493,12 @@ function revertTransfer(id){
 function openTxModal(id){
   const t = id ? DB.transactions.find(x=>x.id===id) : null;
   if(t && transactionStatus(t)==='reconciled'){ toast('Reconciled transactions are locked. Reopen the reconciliation first.', 'error'); return; }
+  if(t&&warnClosedPeriod(t))return;
   const isIncome = t ? t.amount>0 : false;
   const isSplit = !!(t && t.splits && t.splits.length);
   const availableAccounts=activeAccountNames();
   if(t&&t.account&&!availableAccounts.includes(t.account))availableAccounts.push(t.account);
-  const defaultAccount=t&&t.account?t.account:(preferredImportAccountName()||availableAccounts[0]||'');
+  const defaultAccount=t&&t.account?t.account:(DB.appPreferences?.lastUsedAccount&&availableAccounts.includes(DB.appPreferences.lastUsedAccount)?DB.appPreferences.lastUsedAccount:(preferredImportAccountName()||availableAccounts[0]||''));
   const defaultToAccount=availableAccounts.find(account=>account!==defaultAccount)||'';
   const accountOptions=selected=>availableAccounts.map(account=>`<option value="${escAttr(account)}" ${account===selected?'selected':''}>${escHTML(account)}</option>`).join('');
   openModal(`
@@ -542,6 +602,7 @@ function openTxModal(id){
       try{pair=PocketLedgerTransfers.createPair({uid,date,fromAccount,toAccount,sentAmount:amountRaw,receivedAmount,description:desc,notes,status:document.getElementById('tx-transfer-status').value});}
       catch(error){toast(error.message,'error');return;}
       DB.transactions.push(...pair.transactions);
+      DB.appPreferences.lastUsedAccount=fromAccount;
       scheduleSave(); closeModal(); renderContent();
       toast(pair.fee?`Transfer recorded with ${gbp(pair.fee)} cost`:`Transfer of ${gbp(pair.sent)} recorded`);
       return;
@@ -561,7 +622,7 @@ function openTxModal(id){
     } else {
       DB.transactions.push({id:uid('tx'), date, amount, description:desc, category, account, notes, excluded, source:'manual', status});
     }
-    scheduleSave(); closeModal(); renderContent();
+    DB.appPreferences.lastUsedAccount=account;scheduleSave(); closeModal(); renderContent();
     toast(t?'Transaction updated':'Transaction added');
   };
 }
@@ -570,6 +631,7 @@ function openSplitModal(id){
   const t = DB.transactions.find(x=>x.id===id);
   if(!t) return;
   if(transactionStatus(t)==='reconciled'){ toast('Reconciled transactions are locked. Reopen the reconciliation first.', 'error'); return; }
+  if(warnClosedPeriod(t))return;
   if(t.transferId){ toast('Transfers can\u2019t be split', 'error'); return; }
   const sign = t.amount<0 ? -1 : 1;
   const total = Math.abs(t.amount);

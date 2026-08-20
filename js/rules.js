@@ -41,13 +41,60 @@
   }
 
   function suggestCategory(rules,description,amount){
-    let best=null;
+    const match=explainMatch(rules,description,amount);
+    return match?match.rule.category:'';
+  }
+
+  // Rules remain specificity-first for backwards compatibility: the longest
+  // matching keyword wins. Array order is the visible priority when two
+  // matching keywords are equally specific.
+  function explainMatch(rules,description,amount){
+    const candidates=[];
     (rules||[]).forEach((rule,index)=>{
       if(!ruleMatches(rule,description,amount)) return;
-      const keywordLength=String(rule.keyword||'').length;
-      if(!best || keywordLength>best.keywordLength) best={category:rule.category,keywordLength,index};
+      candidates.push({rule,index,keywordLength:String(rule.keyword||'').length});
     });
-    return best?best.category:'';
+    candidates.sort((a,b)=>b.keywordLength-a.keywordLength || a.index-b.index);
+    if(!candidates.length) return null;
+    return {rule:candidates[0].rule,index:candidates[0].index,candidates,reason:candidates.length===1
+      ? `Matched “${candidates[0].rule.keyword}”.`
+      : `“${candidates[0].rule.keyword}” won as the most specific match${candidates[0].keywordLength===candidates[1].keywordLength?' and highest-priority tie':''}.`};
+  }
+
+  function simulateRule(rule,transactions,rules,replacingIndex){
+    const draft=normaliseRule(rule);
+    if(!draft || !String(draft.keyword||'').trim()) return {matches:0,wins:0,uncategorised:0,changes:0,conflicts:0,examples:[]};
+    const projected=(rules||[]).slice();
+    if(Number.isInteger(replacingIndex) && replacingIndex>=0 && replacingIndex<projected.length) projected[replacingIndex]=draft;
+    else projected.unshift(draft);
+    const draftIndex=Number.isInteger(replacingIndex) && replacingIndex>=0 ? replacingIndex : 0;
+    let matches=0,wins=0,uncategorised=0,changes=0,conflicts=0;
+    const examples=[];
+    (transactions||[]).forEach(t=>{
+      if(t.transferId || !ruleMatches(draft,t.description,t.amount)) return;
+      matches++;
+      const outcome=explainMatch(projected,t.description,t.amount);
+      if(!outcome || outcome.index!==draftIndex) return;
+      wins++;
+      if(!t.category && !(t.splits&&t.splits.length)) uncategorised++;
+      if(!t.splits?.length && t.category!==draft.category) changes++;
+      if(outcome.candidates.some(c=>c.index!==draftIndex && c.rule.category!==draft.category)) conflicts++;
+      if(examples.length<5) examples.push({description:t.description,amount:t.amount,currentCategory:t.category||'',candidateCount:outcome.candidates.length});
+    });
+    return {matches,wins,uncategorised,changes,conflicts,examples};
+  }
+
+  function ruleImpact(rules,transactions,index){
+    const rule=(rules||[])[index];
+    if(!rule) return {matches:0,wins:0,shadowed:0};
+    let matches=0,wins=0;
+    (transactions||[]).forEach(t=>{
+      if(t.transferId || !ruleMatches(rule,t.description,t.amount)) return;
+      matches++;
+      const outcome=explainMatch(rules,t.description,t.amount);
+      if(outcome&&outcome.index===index) wins++;
+    });
+    return {matches,wins,shadowed:matches-wins};
   }
 
   function matchingTransactions(transactions,keyword,direction){
@@ -92,5 +139,5 @@
     return {count:Array.isArray(rules)?rules.length:0,invalid,missingCategories,directional,duplicates,conflicts,ok:!invalid.length&&!missingCategories.length&&!conflicts.length};
   }
 
-  global.PocketLedgerRules={normaliseDirection,normaliseRule,normaliseRules,ruleMatches,suggestCategory,matchingTransactions,applyToUncategorised,auditRules};
+  global.PocketLedgerRules={normaliseDirection,normaliseRule,normaliseRules,ruleMatches,suggestCategory,explainMatch,simulateRule,ruleImpact,matchingTransactions,applyToUncategorised,auditRules};
 })(window);

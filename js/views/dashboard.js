@@ -44,8 +44,8 @@ function renderDashboard(c){
     </div>
 
     <div class="kpi-row">
-      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Income</div><div class="kpi-val income num">${gbp(income)}</div><div class="kpi-sub">${list.filter(t=>t.amount>0 && countsTowardTotals(t)).length} transactions</div></div>
-      <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Expenses</div><div class="kpi-val expense num">${gbp(expense)}</div><div class="kpi-sub">${list.filter(t=>t.amount<0 && countsTowardTotals(t)).length} transactions</div></div>
+      <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Income</div><div class="kpi-val income num">${gbp(income)}</div><div class="kpi-sub">${list.filter(t=>t.amount>0 && countsTowardTotals(t)&&!PocketLedgerLinkedEvents.isReturn(t)).length} transactions</div></div>
+      <div class="kpi-card expense"><div class="stripe"></div><div class="kpi-lbl">Expenses</div><div class="kpi-val expense num">${gbp(expense)}</div><div class="kpi-sub">${list.filter(t=>t.amount<0 && countsTowardTotals(t)).length} payments${list.some(PocketLedgerLinkedEvents.isReturn)?` · net of ${list.filter(PocketLedgerLinkedEvents.isReturn).length} return${list.filter(PocketLedgerLinkedEvents.isReturn).length===1?'':'s'}`:''}</div></div>
       <div class="kpi-card net"><div class="stripe"></div><div class="kpi-lbl">Net</div><div class="kpi-val num" style="color:${net>=0?'var(--brand)':'var(--expense)'}">${net>=0?'+':''}${gbp(net)}</div><div class="kpi-sub">Income minus expenses</div></div>
       <div class="kpi-card balance"><div class="stripe"></div><div class="kpi-lbl">Available cash</div><div class="kpi-val num" style="color:var(--gold)">${gbp(balance)}</div><div class="kpi-sub">Current, savings and cash balances less card debt</div></div>
     </div>
@@ -59,7 +59,7 @@ function renderDashboard(c){
             <div class="account-name">${escHTML(a.account)}${a.archived?' · archived':''}</div>
             <div style="font-size:9.5px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.05em;margin-top:2px;">${escHTML(accountTypeConfig(a.type).label)}</div>
             <div class="account-balance num" style="color:${isLiabilityType(a.type)?'var(--expense)':'var(--gold)'}">${isLiabilityType(a.type)&&a.balance<0?`${gbp(Math.abs(a.balance))} owed`:gbp(a.balance)}</div>
-            <div class="account-sub">${a.count} transaction${a.count===1?'':'s'}${a.type==='credit_card'&&a.record&&a.record.creditLimit?` · ${Math.round(Math.max(0,-a.balance)/a.record.creditLimit*100)}% utilised`:''}</div>
+            <div class="account-sub">${a.count} transaction${a.count===1?'':'s'}${a.type==='credit_card'&&a.record&&a.record.creditLimit?` · ${Math.round(Math.max(0,-a.balance)/a.record.creditLimit*100)}% utilised`:''}${a.type==='credit_card'&&a.record?(()=>{const cycle=PocketLedgerLinkedEvents.creditCardSchedule(a.record,todayISO(),a.balance);return cycle?` · next statement ${ukDateShort(cycle.statementDate)} · ${cycle.autopayFullBalance?`${gbp(cycle.expectedPayment)} full-balance DD`:`${gbp(cycle.expectedPayment)} minimum`} due ${ukDateShort(cycle.dueDate)}`:'';})():''}</div>
           </div>
         `).join('')}
       </div>
@@ -306,7 +306,7 @@ function renderBudgets(list, budgetEntries, range){
   const pace = range ? monthPaceInfo(range) : null;
   const isLiveMonth = UI.dashboardMonthOffset===0;
   const rows = budgetEntries.map(([catName, limit])=>{
-    const spent = expandedList.filter(t=> t.category===catName && t.amount<0 && countsTowardTotals(t)).reduce((s,t)=> s+Math.abs(t.amount), 0);
+    const spent = expandedList.filter(t=>t.category===catName).reduce((s,t)=>s+expenseEffect(t),0);
     const pending = pendingForCategory(catName, isLiveMonth);
     const combined = spent + pending;
     const pct = limit>0 ? Math.min(999, Math.round(combined/limit*100)) : 0;
@@ -448,8 +448,8 @@ function renderCompareTable(list, prevList){
   const host = document.getElementById('compare-table');
   if(!host) return;
   const byCat = {};
-  expandSplits(list).forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].cur+=Math.abs(t.amount); } });
-  expandSplits(prevList).forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=byCat[k]||{cur:0,prev:0}; byCat[k].prev+=Math.abs(t.amount); } });
+  expandSplits(list).forEach(t=>{const effect=expenseEffect(t);if(effect){const k=t.category||'Uncategorised';byCat[k]=byCat[k]||{cur:0,prev:0};byCat[k].cur+=effect;}});
+  expandSplits(prevList).forEach(t=>{const effect=expenseEffect(t);if(effect){const k=t.category||'Uncategorised';byCat[k]=byCat[k]||{cur:0,prev:0};byCat[k].prev+=effect;}});
   const rows = Object.entries(byCat)
     .map(([name,v])=> ({name, ...v, delta:v.cur-v.prev}))
     .sort((a,b)=> Math.abs(b.delta)-Math.abs(a.delta))
@@ -644,7 +644,7 @@ function drawCashFlowChart(list, income){
   expandSplits(list).forEach(t=>{
     if(!countsTowardTotals(t)) return;
     if(t.amount>0){ const k=t.category||'Uncategorised'; byIncomeCat[k]=(byIncomeCat[k]||0)+t.amount; }
-    else if(t.amount<0){ const k=t.category||'Uncategorised'; byExpenseCat[k]=(byExpenseCat[k]||0)+Math.abs(t.amount); }
+    else {const effect=expenseEffect(t);if(effect){const k=t.category||'Uncategorised';byExpenseCat[k]=(byExpenseCat[k]||0)+effect;}}
   });
 
   const incomeSorted = Object.entries(byIncomeCat).sort((a,b)=> b[1]-a[1]);
@@ -768,7 +768,7 @@ const DONUT_COLORS_DARK = ['#2FBE8A','#E3AC4E','#F17164','#6699FF','#A78BFA','#2
 function getDonutColors(){ return isDarkMode() ? DONUT_COLORS_DARK : DONUT_COLORS; }
 function drawDonutChart(list, chartKey, canvasId, legendId, emptyTitle, emptyDesc){
   const byCat = {};
-  expandSplits(list).forEach(t=>{ if(t.amount<0 && countsTowardTotals(t)){ const k=t.category||'Uncategorised'; byCat[k]=(byCat[k]||0)+Math.abs(t.amount); } });
+  expandSplits(list).forEach(t=>{const effect=expenseEffect(t);if(effect){const k=t.category||'Uncategorised';byCat[k]=(byCat[k]||0)+effect;}});
   let entries = Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
   if(entries.length>8){
     const top = entries.slice(0,7);
@@ -806,4 +806,3 @@ function drawYTDChart(){
   const ytdList = txInRange(`${y}-01-01`, todayISO());
   drawDonutChart(ytdList, 'ytd', 'ytd-chart', 'ytd-legend', 'No spending yet this year', 'Categorised expenses since 1 January will appear here.');
 }
-

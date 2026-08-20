@@ -92,11 +92,37 @@ function confirmDeleteInvestmentValuation(id){
   openModal(`<div class="modal-head"><h3>Delete this valuation?</h3></div><div class="modal-body"><p style="margin:0;color:var(--ink-soft);font-size:13px;">${escHTML(record?record.name:valuation.accountName)} · ${ukDate(valuation.date)} · ${gbp(valuation.value)}</p><p style="margin:10px 0 0;color:var(--ink-faint);font-size:11.5px;">Transactions and transfers are not affected. The account will fall back to its previous valuation or opening balance.</p></div><div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-danger" id="m-delete">Delete valuation</button></div>`);
   document.getElementById('m-cancel').onclick=closeModal;document.getElementById('m-delete').onclick=()=>{DB.investmentValuations=DB.investmentValuations.filter(v=>v.id!==id);scheduleSave();closeModal();renderContent();renderSidebarBits();toast('Investment valuation deleted');};
 }
+function openTrading212ImportModal(){
+  const accounts=investmentAccountRecords().filter(record=>!record.archived);
+  if(!accounts.length){toast('Add an active investment account first','error');return;}
+  openModal(`<div class="modal-head"><h3>Import Trading 212 history</h3></div><div class="modal-body"><div class="field"><label>Trading 212 product</label><select id="t212-account">${accounts.map(record=>`<option value="${escAttr(record.id)}">${escHTML(record.name)}</option>`).join('')}</select><span style="font-size:10.5px;color:var(--ink-faint);">Choose Invest or Stocks &amp; Shares ISA explicitly. Activities never move between products automatically.</span></div><div class="dropzone" id="t212-drop" style="margin-top:14px;"><p><strong>Choose a Trading 212 History CSV</strong></p><button class="btn btn-primary btn-sm" id="t212-browse">Choose file</button><input class="hidden" id="t212-file" type="file" accept=".csv,text/csv"><p class="hint">Trades stay separate from household income and spending. Deposits and withdrawals are matched to existing account transfers.</p></div></div><div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button></div>`);
+  document.getElementById('m-cancel').onclick=closeModal;const input=document.getElementById('t212-file');document.getElementById('t212-browse').onclick=()=>input.click();
+  input.onchange=async()=>{
+    const file=input.files&&input.files[0];if(!file)return;const record=accounts.find(item=>item.id===document.getElementById('t212-account').value);if(!record)return;
+    try{const buffer=await file.arrayBuffer(),fingerprint=await ImportEngine.fingerprintBuffer(buffer),text=ImportEngine.decodeSmart(buffer),parsed=PocketLedgerTrading212.parse(text,csv=>Papa.parse(csv,{skipEmptyLines:true}));if(!parsed.activities.length)throw new Error('No supported activity rows were found.');openTrading212Preview(record,file.name,fingerprint,parsed.activities);}catch(error){console.error(error);toast(error.message||'Could not read that Trading 212 export','error');}
+  };
+}
+function openTrading212Preview(record,fileName,fingerprint,activities){
+  const matched=PocketLedgerTrading212.matchFunding(activities,DB.transactions,record),existingKeys=new Set((DB.investmentActivities||[]).map(activity=>activity.activityKey)),prepared=matched.map(activity=>Object.assign(activity,{activityKey:PocketLedgerTrading212.activityKey(activity,record.id)})).map(activity=>Object.assign(activity,{duplicate:existingKeys.has(activity.activityKey)}));
+  const included=prepared.filter(activity=>!activity.duplicate),summary=PocketLedgerTrading212.summarise(included),duplicates=prepared.length-included.length;
+  openModal(`<div class="modal-head"><h3>Review Trading 212 activity</h3></div><div class="modal-body"><p style="margin:0 0 12px;color:var(--ink-soft);font-size:12.5px;"><strong>${escHTML(record.name)}</strong> · ${escHTML(fileName)}</p><div class="reconcile-summary"><div class="reconcile-figure"><div class="lbl">New rows</div><div class="val num">${included.length}</div></div><div class="reconcile-figure"><div class="lbl">Funding matched</div><div class="val num">${included.filter(activity=>activity.matchStatus==='matched').length}</div></div><div class="reconcile-figure"><div class="lbl">Funding unmatched</div><div class="val num">${summary.unmatchedFunding}</div></div></div><div class="qc-line"><span>Deposits / withdrawals</span><span class="num">${gbp(summary.deposits)} / ${gbp(summary.withdrawals)}</span></div><div class="qc-line"><span>Dividends / cash interest</span><span class="num">${gbp(summary.dividends)} / ${gbp(summary.interest)}</span></div><div class="qc-line"><span>Trades / recorded fees</span><span class="num">${summary.trades} / ${gbp(summary.fees)}</span></div>${duplicates?`<p style="font-size:11px;color:var(--ink-faint);">${duplicates} previously imported row${duplicates===1?' was':'s were'} excluded.</p>`:''}${summary.unmatchedFunding?`<p style="font-size:11.5px;color:var(--gold);">Unmatched deposits or withdrawals will be retained for review but will not create ledger transactions automatically.</p>`:''}<div class="table-wrap" style="max-height:250px;margin-top:12px;"><table><thead><tr><th>Date</th><th>Action</th><th>Instrument</th><th>Link</th><th style="text-align:right">Total</th></tr></thead><tbody>${included.slice(0,80).map(activity=>`<tr><td>${ukDateShort(activity.date)}</td><td>${escHTML(activity.action)}</td><td class="desc">${escHTML(activity.ticker||activity.name||'—')}</td><td><span class="stamp-mini">${activity.matchStatus==='matched'?'transfer matched':activity.matchStatus==='unmatched'?'review':'activity'}</span></td><td class="amt ${activity.amount>0?'income':'expense'}">${gbp(activity.amount,{signed:true})}</td></tr>`).join('')}</tbody></table></div></div><div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="t212-confirm" ${included.length?'':'disabled'}>Import ${included.length} rows</button></div>`,{wide:true});
+  document.getElementById('m-cancel').onclick=closeModal;document.getElementById('t212-confirm').onclick=()=>{
+    const sessionId=uid('iimp'),importedAt=new Date().toISOString(),activityIds=[];if(!DB.investmentActivities)DB.investmentActivities=[];
+    included.forEach(activity=>{const saved=Object.assign({},activity,{id:uid('ia'),sessionId,accountId:record.id,accountName:record.name,provider:'trading212',importedAt});delete saved.duplicate;DB.investmentActivities.push(saved);activityIds.push(saved.id);});
+    const dates=included.map(activity=>activity.date).sort();if(!DB.investmentImportSessions)DB.investmentImportSessions=[];DB.investmentImportSessions.push({id:sessionId,provider:'trading212',fileName,fileFingerprint:fingerprint,importedAt,accountId:record.id,accountName:record.name,totalRows:prepared.length,importedCount:included.length,duplicateCount:duplicates,matchedFundingCount:included.filter(activity=>activity.matchStatus==='matched').length,unmatchedFundingCount:summary.unmatchedFunding,startDate:dates[0]||'',endDate:dates[dates.length-1]||'',activityIds});
+    scheduleSave();closeModal();renderContent();toast(`Imported ${included.length} Trading 212 activities into ${record.name}`);
+  };
+}
+function renderTrading212ActivityPanel(){
+  const rows=DB.investmentActivities||[];if(!rows.length)return '';
+  const summary=PocketLedgerTrading212.summarise(rows),last=(DB.investmentImportSessions||[]).slice().sort((a,b)=>String(b.importedAt).localeCompare(String(a.importedAt)))[0];
+  return `<div class="panel" style="margin-bottom:16px;"><div class="panel-head"><div class="panel-title">Trading 212 activity<small>Provider history for audit; trades do not become household spending</small></div><button class="btn btn-sm" id="btn-t212-import-more">Import CSV</button></div><div class="qc-line"><span>Deposits / withdrawals in retained history</span><span class="num">${gbp(summary.deposits)} / ${gbp(summary.withdrawals)}</span></div><div class="qc-line"><span>Dividends / cash interest</span><span class="num">${gbp(summary.dividends)} / ${gbp(summary.interest)}</span></div><div class="qc-line"><span>Trades / fees</span><span class="num">${summary.trades} / ${gbp(summary.fees)}</span></div><div class="qc-line"><span>Unmatched funding rows</span><span class="num" style="color:${summary.unmatchedFunding?'var(--gold)':'var(--income)'}">${summary.unmatchedFunding}</span></div>${last?`<p style="font-size:10.5px;color:var(--ink-faint);margin:10px 0 0;">Last import: ${escHTML(last.fileName)} · ${timeAgoLabel(last.importedAt)} · ${escHTML(last.accountName)}</p>`:''}</div>`;
+}
 function renderInvestmentValuationPanel(){
   const accounts=investmentAccountRecords(),valuations=(DB.investmentValuations||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
   if(!accounts.length)return '';
   return `<div class="panel" style="margin-bottom:16px;">
-    <div class="panel-head"><div class="panel-title">Portfolio values<small>Valuations change net worth; transfers explain money added or withdrawn</small></div></div>
+    <div class="panel-head"><div class="panel-title">Portfolio values<small>Valuations change net worth; transfers explain money added or withdrawn</small></div><button class="btn btn-sm" id="btn-t212-import">Import Trading 212 CSV</button></div>
     ${accounts.map(record=>{
       const latest=latestInvestmentValuation(record.id),balance=accountBalanceByName(record.name),performance=latest?investmentValuationPerformance(latest):null;
       const lifetime=investmentAccountLifetimeStats(record);
@@ -144,6 +170,7 @@ function renderInvestments(c){
     </div>
 
     ${renderInvestmentValuationPanel()}
+    ${renderTrading212ActivityPanel()}
 
     <div class="kpi-row">
       <div class="kpi-card income"><div class="stripe"></div><div class="kpi-lbl">Gross contributions</div><div class="kpi-val income num">${gbp(h.investAmt)}</div><div class="kpi-sub">${h.count} contribution${h.count===1?'':'s'} · ${range.label}</div></div>
@@ -194,6 +221,7 @@ function renderInvestments(c){
   document.querySelectorAll('[data-action="add-valuation"]').forEach(b=>b.onclick=()=>openInvestmentValuationModal(null,b.dataset.accountId));
   document.querySelectorAll('[data-action="edit-valuation"]').forEach(b=>b.onclick=()=>openInvestmentValuationModal(b.dataset.id));
   document.querySelectorAll('[data-action="delete-valuation"]').forEach(b=>b.onclick=()=>confirmDeleteInvestmentValuation(b.dataset.id));
+  const t212Button=document.getElementById('btn-t212-import');if(t212Button)t212Button.onclick=openTrading212ImportModal;const t212More=document.getElementById('btn-t212-import-more');if(t212More)t212More.onclick=openTrading212ImportModal;
 
   const recHost = document.getElementById('invest-recurring-list');
   if(!recurring.length){
@@ -271,4 +299,3 @@ function drawInvestRateChart(){
     }
   });
 }
-

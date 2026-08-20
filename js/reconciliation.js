@@ -37,6 +37,7 @@
       id:transaction.id,date:transaction.date,description:String(transaction.description||''),amount:money.round(transaction.amount),
       category:String(transaction.category||''),account:String(transaction.account||''),status:status(transaction),
       transferId:transaction.transferId||null,excluded:!!transaction.excluded,isAdjustment:!!transaction.isAdjustment,
+      linkedEventId:transaction.linkedEventId||null,linkedEventType:transaction.linkedEventType||null,linkedTransactionId:transaction.linkedTransactionId||null,
     };
   }
   function snapshotAudit(record,transactions,account){
@@ -45,7 +46,7 @@
     const currentById=new Map((transactions||[]).map(transaction=>[transaction.id,transaction])),missing=[],changed=[];
     snapshots.forEach(snapshot=>{
       const current=currentById.get(snapshot.id);if(!current){missing.push(snapshot);return;}
-      const now=transactionSnapshot(current),fields=['date','description','amount','category','account','status','transferId','excluded','isAdjustment'];
+      const now=transactionSnapshot(current),fields=['date','description','amount','category','account','status','transferId','excluded','isAdjustment','linkedEventId','linkedEventType','linkedTransactionId'];
       const differences=fields.filter(field=>now[field]!==snapshot[field]);if(differences.length)changed.push({id:snapshot.id,fields:differences,snapshot,current:now});
     });
     const ids=new Set(snapshots.map(snapshot=>snapshot.id)),start=record.statementStartDate||'',end=record.statementDate;

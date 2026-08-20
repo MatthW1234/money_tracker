@@ -40,7 +40,7 @@
     function makeAccountRecord(name,type,openingBalance,extra){
       return Object.assign({
         id:uid('acct'),name:String(name||'').trim(),type:type||inferAccountType(name),institution:'',currency:'GBP',
-        openingBalance:money.round(openingBalance),openingBalanceDate:'',creditLimit:null,
+        openingBalance:money.round(openingBalance),openingBalanceDate:'',creditLimit:null,statementDay:null,dueDay:null,minimumPayment:null,autopayFullBalance:false,
         archived:false,includeInNetWorth:true,createdAt:new Date().toISOString(),
       },extra||{});
     }
@@ -48,6 +48,7 @@
       return ['pending','cleared','reconciled'].includes(transaction.status)?transaction.status:'cleared';
     }
     function countsTowardTotals(transaction){return !transaction.transferId&&!transaction.excluded&&transaction.status!=='pending';}
+    function expenseEffect(transaction){return global.PocketLedgerLinkedEvents?global.PocketLedgerLinkedEvents.expenseEffect(transaction,countsTowardTotals):(transaction&&transaction.amount<0&&countsTowardTotals(transaction)?Math.abs(transaction.amount):0);}
     function categoryRowsFor(transaction){
       if(transaction.splits&&transaction.splits.length){
         return transaction.splits.map(split=>Object.assign({},transaction,{category:split.category,amount:split.amount,splitId:split.id,isSplitPart:true}));
@@ -55,8 +56,8 @@
       return [transaction];
     }
     function expandSplits(list){return (list||[]).flatMap(categoryRowsFor);}
-    function sumIncome(list){return money.sum((list||[]).filter(t=>t.amount>0&&countsTowardTotals(t)).map(t=>t.amount));}
-    function sumExpense(list){return money.sum((list||[]).filter(t=>t.amount<0&&countsTowardTotals(t)).map(t=>Math.abs(t.amount)));}
+    function sumIncome(list){return money.sum((list||[]).filter(t=>t.amount>0&&countsTowardTotals(t)&&!(global.PocketLedgerLinkedEvents&&global.PocketLedgerLinkedEvents.isReturn(t))).map(t=>t.amount));}
+    function sumExpense(list){return money.sum((list||[]).map(expenseEffect));}
     function accountRecordFor(reference){return (db().accountRecords||[]).find(record=>record.id===reference||record.name===reference)||null;}
     function transactionAccountRecord(transaction){return accountRecordFor(transaction&&transaction.accountId)||accountRecordFor(transaction&&transaction.account)||null;}
     function transactionBelongsToAccount(transaction,reference){const record=accountRecordFor(reference);return record?transactionAccountRecord(transaction)===record:!!transaction&&transaction.account===reference;}
@@ -87,6 +88,8 @@
       ledger.transactions.forEach(transaction=>{const record=transactionAccountRecord(transaction);if(record){transaction.accountId=record.id;transaction.account=record.name;}});
       (ledger.importSessions||[]).forEach(session=>{const record=accountRecordFor(session.accountId)||accountRecordFor(session.accountName);if(record){session.accountId=record.id;session.accountName=record.name;}});
       (ledger.importProfiles||[]).forEach(profile=>{const record=accountRecordFor(profile.accountId)||accountRecordFor(profile.accountName);if(record){profile.accountId=record.id;profile.accountName=record.name;}});
+      (ledger.investmentActivities||[]).forEach(activity=>{const record=accountRecordFor(activity.accountId)||accountRecordFor(activity.accountName);if(record){activity.accountId=record.id;activity.accountName=record.name;}});
+      (ledger.investmentImportSessions||[]).forEach(session=>{const record=accountRecordFor(session.accountId)||accountRecordFor(session.accountName);if(record){session.accountId=record.id;session.accountName=record.name;}});
       ledger.startingBalance=ledger.accountRecords.length?(Number(ledger.accountRecords[0].openingBalance)||0):0;
     }
     function ensureAccountRecord(name){
@@ -153,6 +156,8 @@
         id:typeof raw.id==='string'&&raw.id?raw.id:uid('acct'),institution:typeof raw.institution==='string'?raw.institution:'',
         currency:typeof raw.currency==='string'&&raw.currency?raw.currency:'GBP',openingBalanceDate:validISODate(raw.openingBalanceDate)?raw.openingBalanceDate:'',
         creditLimit:Number.isFinite(creditLimit)&&creditLimit>0?creditLimit:null,archived:!!raw.archived,
+        statementDay:raw.statementDay==null?null:clamp(Math.round(Number(raw.statementDay)||1),1,28),dueDay:raw.dueDay==null?null:clamp(Math.round(Number(raw.dueDay)||1),1,28),
+        minimumPayment:raw.minimumPayment==null||!Number.isFinite(Number(raw.minimumPayment))?null:money.round(Math.max(0,Number(raw.minimumPayment))),autopayFullBalance:!!raw.autopayFullBalance,
         includeInNetWorth:raw.includeInNetWorth!==false,createdAt:typeof raw.createdAt==='string'?raw.createdAt:new Date().toISOString(),
       });
     }
@@ -234,6 +239,38 @@
         transactionIds:Array.isArray(raw.transactionIds)?raw.transactionIds.filter(value=>typeof value==='string'):[],rows,
       };
     }
+    function normaliseInvestmentActivity(raw,accountRecords){
+      if(!isPlainObject(raw)||!validISODate(raw.date)||!String(raw.action||''))return null;
+      const record=accountRecords.find(item=>item.id===raw.accountId)||accountRecords.find(item=>item.name===raw.accountName);
+      if(!record||!['investment','pension'].includes(record.type))return null;
+      const types=['deposit','withdrawal','dividend','interest','trade_buy','trade_sell','fee','currency_conversion','other'];
+      return {
+        id:typeof raw.id==='string'&&raw.id?raw.id:uid('ia'),sessionId:typeof raw.sessionId==='string'?raw.sessionId:'',accountId:record.id,accountName:record.name,
+        provider:'trading212',providerId:typeof raw.providerId==='string'?raw.providerId:'',activityKey:typeof raw.activityKey==='string'?raw.activityKey:'',
+        rowNumber:Math.max(1,Math.round(Number(raw.rowNumber)||1)),action:String(raw.action),type:types.includes(raw.type)?raw.type:'other',date:raw.date,time:typeof raw.time==='string'?raw.time:'',
+        amount:money.round(raw.amount),fee:money.round(raw.fee),currency:typeof raw.currency==='string'&&raw.currency?raw.currency:'GBP',result:money.round(raw.result),
+        name:typeof raw.name==='string'?raw.name:'',ticker:typeof raw.ticker==='string'?raw.ticker:'',isin:typeof raw.isin==='string'?raw.isin:'',shares:finiteNumber(Number(raw.shares),0),notes:typeof raw.notes==='string'?raw.notes:'',
+        linkedTransactionId:typeof raw.linkedTransactionId==='string'?raw.linkedTransactionId:'',matchStatus:['matched','unmatched','not-required'].includes(raw.matchStatus)?raw.matchStatus:'not-required',
+        rawRow:Array.isArray(raw.rawRow)?raw.rawRow.map(value=>String(value==null?'':value)):[],importedAt:typeof raw.importedAt==='string'?raw.importedAt:new Date().toISOString(),
+      };
+    }
+    function normaliseInvestmentImportSession(raw,accountRecords){
+      if(!isPlainObject(raw)||!String(raw.id||'')||!String(raw.fileName||''))return null;
+      const record=accountRecords.find(item=>item.id===raw.accountId)||accountRecords.find(item=>item.name===raw.accountName);if(!record)return null;
+      return {
+        id:String(raw.id),provider:'trading212',fileName:String(raw.fileName),fileFingerprint:typeof raw.fileFingerprint==='string'?raw.fileFingerprint:'',
+        importedAt:typeof raw.importedAt==='string'?raw.importedAt:new Date().toISOString(),accountId:record.id,accountName:record.name,
+        totalRows:Math.max(0,Math.round(Number(raw.totalRows)||0)),importedCount:Math.max(0,Math.round(Number(raw.importedCount)||0)),duplicateCount:Math.max(0,Math.round(Number(raw.duplicateCount)||0)),
+        matchedFundingCount:Math.max(0,Math.round(Number(raw.matchedFundingCount)||0)),unmatchedFundingCount:Math.max(0,Math.round(Number(raw.unmatchedFundingCount)||0)),
+        startDate:validISODate(raw.startDate)?raw.startDate:'',endDate:validISODate(raw.endDate)?raw.endDate:'',activityIds:Array.isArray(raw.activityIds)?raw.activityIds.filter(value=>typeof value==='string'):[],
+      };
+    }
+    function normaliseTransactionLink(raw,transactions){
+      if(!isPlainObject(raw)||!String(raw.id||'')||!['refund','reversal','chargeback'].includes(raw.type))return null;
+      const original=transactions.find(transaction=>transaction.id===raw.originalTransactionId),returned=transactions.find(transaction=>transaction.id===raw.returnTransactionId);if(!original||!returned)return null;
+      returned.linkedEventId=String(raw.id);returned.linkedEventType=raw.type;returned.linkedTransactionId=original.id;if(!returned.category&&original.category)returned.category=original.category;
+      return {id:String(raw.id),type:raw.type,originalTransactionId:original.id,returnTransactionId:returned.id,amount:money.round(Math.abs(Number(raw.amount)||returned.amount)),createdAt:typeof raw.createdAt==='string'?raw.createdAt:new Date().toISOString(),notes:typeof raw.notes==='string'?raw.notes:''};
+    }
     function normaliseReconciliations(raw,transactions){
       if(!isPlainObject(raw))return {};
       const result={};
@@ -247,7 +284,8 @@
             id:snapshot.id,date:validISODate(snapshot.date)?snapshot.date:'',description:typeof snapshot.description==='string'?snapshot.description:'',
             amount:money.round(finiteNumber(Number(snapshot.amount),0)),category:typeof snapshot.category==='string'?snapshot.category:'',account:typeof snapshot.account==='string'?snapshot.account:account,
             status:['pending','cleared','reconciled'].includes(snapshot.status)?snapshot.status:'reconciled',transferId:typeof snapshot.transferId==='string'?snapshot.transferId:null,
-            excluded:!!snapshot.excluded,isAdjustment:!!snapshot.isAdjustment,
+            excluded:!!snapshot.excluded,isAdjustment:!!snapshot.isAdjustment,linkedEventId:typeof snapshot.linkedEventId==='string'?snapshot.linkedEventId:null,
+            linkedEventType:typeof snapshot.linkedEventType==='string'?snapshot.linkedEventType:null,linkedTransactionId:typeof snapshot.linkedTransactionId==='string'?snapshot.linkedTransactionId:null,
           })):[];
           return Object.assign({},entry,{
             id,statementDate:entry.statementDate,statementStartDate:validISODate(entry.statementStartDate)?entry.statementStartDate:'',statementBalance:money.round(entry.statementBalance),
@@ -323,6 +361,15 @@
         importSessions:Array.isArray(raw.importSessions)?raw.importSessions.map(session=>normaliseImportSession(session,accountRecords)).filter(Boolean):[],
         netWorthSnapshots:Array.isArray(raw.netWorthSnapshots)?raw.netWorthSnapshots.filter(s=>isPlainObject(s)&&validISODate(s.date)&&Number.isFinite(Number(s.netWorth))).map(s=>Object.assign({},s,{netWorth:Number(s.netWorth),totalAssets:Number(s.totalAssets)||0,totalLiabilities:Number(s.totalLiabilities)||0})):[],
         investmentValuations:Array.isArray(raw.investmentValuations)?raw.investmentValuations.map(v=>normaliseInvestmentValuation(v,accountRecords)).filter(Boolean):[],
+        investmentActivities:Array.isArray(raw.investmentActivities)?raw.investmentActivities.map(activity=>normaliseInvestmentActivity(activity,accountRecords)).filter(Boolean):[],
+        investmentImportSessions:Array.isArray(raw.investmentImportSessions)?raw.investmentImportSessions.map(session=>normaliseInvestmentImportSession(session,accountRecords)).filter(Boolean):[],
+        transactionLinks:Array.isArray(raw.transactionLinks)?raw.transactionLinks.map(link=>normaliseTransactionLink(link,transactions)).filter(Boolean):[],
+        savedViews:Array.isArray(raw.savedViews)?raw.savedViews.filter(isPlainObject).map(view=>({id:typeof view.id==='string'&&view.id?view.id:uid('view'),name:String(view.name||'Saved view').slice(0,80),filters:isPlainObject(view.filters)?Object.assign({},view.filters):{},createdAt:typeof view.createdAt==='string'?view.createdAt:new Date().toISOString()})):[],
+        accountCloses:Array.isArray(raw.accountCloses)?raw.accountCloses.filter(isPlainObject).map(close=>({id:String(close.id||uid('close')),accountId:String(close.accountId||''),accountName:String(close.accountName||''),closedThrough:validISODate(close.closedThrough)?close.closedThrough:'',closedAt:typeof close.closedAt==='string'?close.closedAt:new Date().toISOString(),note:String(close.note||''),reopenedAt:typeof close.reopenedAt==='string'?close.reopenedAt:null,reopenNote:String(close.reopenNote||''),snapshots:Array.isArray(close.snapshots)?close.snapshots.filter(isPlainObject):[]})).filter(close=>close.closedThrough):[],
+        accountCloseAudit:Array.isArray(raw.accountCloseAudit)?raw.accountCloseAudit.filter(isPlainObject):[],
+        recurringMatches:Array.isArray(raw.recurringMatches)?raw.recurringMatches.filter(isPlainObject).map(match=>({id:String(match.id||uid('recmatch')),recurringItemId:String(match.recurringItemId||''),transactionId:String(match.transactionId||''),expectedDate:validISODate(match.expectedDate)?match.expectedDate:'',actualDate:validISODate(match.actualDate)?match.actualDate:'',expectedAmount:money.round(match.expectedAmount),actualAmount:money.round(match.actualAmount),matchedAt:typeof match.matchedAt==='string'?match.matchedAt:new Date().toISOString(),source:String(match.source||'confirmed')})).filter(match=>match.recurringItemId&&match.transactionId):[],
+        appPreferences:global.PocketLedgerPreferences?global.PocketLedgerPreferences.normalise(raw.appPreferences):{},
+        dismissedAlerts:Array.isArray(raw.dismissedAlerts)?raw.dismissedAlerts.map(item=>typeof item==='string'?{id:item,dismissedAt:null}:item).filter(isPlainObject).map(item=>({id:String(item.id||''),dismissedAt:typeof item.dismissedAt==='string'?item.dismissedAt:null})).filter(item=>item.id):[],
       });
       if(importedMigration.count){
         clean.recurringItems.forEach(item=>{if(isLegacyImportedAccount(item.account))item.account=importedMigration.target;});
@@ -347,10 +394,10 @@
 
     return {
       isPlainObject,validISODate,finiteNumber,accountTypeConfig,isLiabilityType,inferAccountType,makeAccountRecord,
-      transactionStatus,countsTowardTotals,categoryRowsFor,expandSplits,sumIncome,sumExpense,accountRecordFor,transactionAccountRecord,transactionBelongsToAccount,
+      transactionStatus,countsTowardTotals,expenseEffect,categoryRowsFor,expandSplits,sumIncome,sumExpense,accountRecordFor,transactionAccountRecord,transactionBelongsToAccount,
       allAccountNames,activeAccountNames,isLegacyImportedAccount,preferredImportAccountName,syncLegacyAccounts,
       ensureAccountRecord,accountOpeningBalance,accountTransactionsTo,clearedAccountBalance,reconciliationHistory,currentBalance,
-      normaliseTransaction,normaliseAccountRecord,normaliseRecurringItem,normaliseSavingsGoal,normaliseInvestmentValuation,normaliseImportProfile,normaliseImportSession,normaliseReconciliations,
+      normaliseTransaction,normaliseAccountRecord,normaliseRecurringItem,normaliseSavingsGoal,normaliseInvestmentValuation,normaliseImportProfile,normaliseImportSession,normaliseInvestmentActivity,normaliseInvestmentImportSession,normaliseTransactionLink,normaliseReconciliations,
       migrateAccountRecords,preferredCurrentAccountNameFromRaw,migrateLegacyImportedAssignments,normaliseDB,
     };
   }

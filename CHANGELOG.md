@@ -1,5 +1,130 @@
 # Pocket Ledger changelog
 
+## 1.34 — explainable anomaly alerts
+
+- Added local alerts for unusual merchant spending, missed expected income,
+  subscription price increases and materially changed card bills.
+- Spending comparisons require at least three earlier payments and display the
+  latest amount against a recent median; alert IDs remain stable.
+- Alerts appear in the Review inbox, link to the underlying transaction or
+  Spending Plan, and never edit ledger data automatically.
+- Individual alerts can be dismissed without hiding later occurrences carrying
+  a different transaction or expected-date identity.
+- Advanced the schema from 20 to 21 with an empty dismissal list for older
+  backups.
+
+## 1.33 — desktop shortcuts and retained layout
+
+- Added a keyboard command palette and shortcuts for search, add transaction,
+  import and reconciliation; form fields suppress shortcuts while typing.
+- Added compact/comfortable table density and optional account/status columns.
+- Transaction sort, filters and last-used account now persist locally and in
+  complete JSON backups.
+- Added current-month, last-statement and UK tax-year date presets, with tax
+  years calculated from 6 April through 5 April.
+- Advanced the schema from 19 to 20 with conservative default preferences for
+  older ledgers.
+
+## 1.32 — recurring occurrence confirmation
+
+- Added ranked matching between confirmed schedules and existing imported
+  transactions using account, direction, date, amount and description.
+- Schedules advance only after explicit confirmation; no candidate is silently
+  linked or used to change a forecast.
+- Candidate labels disclose late dates, changed amounts and multiple plausible
+  matches before confirmation.
+- Match history retains expected/actual date and amount, transaction identity,
+  source and confirmation time.
+- Advanced the schema from 18 to 19 with an empty recurring-match history for
+  older backups.
+
+## 1.31 — period close and edit guardrails
+
+- Added account-specific soft closes through a chosen statement date.
+- Close records retain transaction field snapshots and report added, deleted or
+  edited records independently of their net balance effect.
+- Protected transactions are excluded from bulk edits and guarded from inline
+  category, split, transfer, linked-return, edit and deletion actions.
+- Reopening requires an explanatory note and retains both the original close
+  and a reopen audit record.
+- Advanced the schema from 17 to 18; existing ledgers migrate with no closes.
+
+## 1.30 — review inbox and saved views
+
+- Added a unified read-only inbox for uncategorised spending, exact duplicate
+  groups, incomplete transfers and unmatched investment funding.
+- Added built-in transaction views for this month, missing receipts and card
+  purchases of £100 or more.
+- Custom combinations of search, category, type, status and dates can now be
+  saved locally, reopened and deleted.
+- Reused the existing batch account/category/status actions and one-step Undo
+  mechanism as the safe resolution workflow.
+- Advanced the schema from 16 to 17 with an empty saved-view collection for
+  older ledgers; all 1,116 supplied transactions and 141 rules remain intact.
+
+## 1.29 — verified backup and recovery preview
+
+- JSON backups now include a versioned manifest, creation timestamp, data
+  summary and deterministic checksum for detecting accidental corruption.
+- Restore verifies new backups before normalisation and blocks mismatched or
+  unsupported manifests; older backups remain available as legacy/unverified.
+- Restore preview shows count deltas, new/removed transaction IDs, date range,
+  source age and a warning when the source schema is newer than the app.
+- Added a portable transactions CSV export with IDs, account, status, transfer
+  and linked-event fields alongside the existing complete JSON backup.
+- Data Health warns when no backup is recorded or the latest is over 30 days
+  old. The automatic pre-restore recovery snapshot is retained.
+- Retained schema version 16 because integrity metadata exists only in exported
+  files and older schema-16 backups remain compatible.
+
+## 1.28 — rule workshop
+
+- Added explainable rule matching: the longest applicable keyword remains the
+  winner, and visible rule order now explicitly resolves equal-specificity ties.
+- Rule rows show how many historical transactions they match and how many they
+  actually win after more-specific rules are considered.
+- Draft and edited rules are simulated before save, including category changes,
+  uncategorised matches, superseded matches and competing-category matches.
+- Added priority controls without changing rule content or removing duplicates;
+  the supplied 141-rule ordering remains intact until deliberately edited.
+- Retained schema version 16 because this checkpoint changes rule tooling, not
+  the persisted backup shape.
+
+## 1.27 — linked returns and credit-card dates
+
+- Advanced the ledger schema from 15 to 16 and added durable links between an
+  original outgoing transaction and a later refund, reversal or chargeback.
+- Linked returns reduce the original spending category rather than appearing
+  as household income, and inherit the original category when uncategorised.
+- Transaction rows expose the relationship and allow it to be removed without
+  deleting either underlying bank entry.
+- Reconciliation snapshots retain linked-event identity, so later relationship
+  edits are visible to audit diagnostics.
+- Credit-card accounts can retain statement day, due day, minimum payment and
+  full-balance Direct Debit preference; upcoming dates appear on the dashboard.
+- Data Health checks orphaned links, wrong directions/accounts and cumulative
+  returned amounts above the original debit.
+
+## 1.26 — Trading 212 activity import
+
+- Advanced the ledger schema from 14 to 15 and added a dedicated local Trading
+  212 History CSV parser for Invest, Stocks & Shares ISA and pension-style
+  investment accounts.
+- The importer separates deposits, withdrawals, buys, sells, dividends, cash
+  interest, currency conversion and fees without turning portfolio trades into
+  household income or spending.
+- Users choose the exact investment product before import. Provider activity is
+  never moved between Invest and S&S ISA automatically.
+- Deposits and withdrawals are matched by account, direction, amount and date
+  to existing transfer legs. Unmatched funding is retained for review rather
+  than silently creating or duplicating ledger transactions.
+- Provider IDs or stable row keys prevent overlapping history exports from
+  duplicating activity. Raw source rows and import-session fingerprints remain
+  available in backups.
+- Investments now summarises retained provider deposits, withdrawals,
+  dividends, interest, trades, fees and unmatched funding; Data Health checks
+  duplicate activities and broken transfer links.
+
 ## 1.25 — statement-assisted reconciliation
 
 - Advanced the ledger schema from 13 to 14 and connected retained import

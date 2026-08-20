@@ -44,6 +44,7 @@ function openAccountModal(id,preferredType){
     <div class="field"><label id="acct-opening-label">Opening balance (£)</label><input type="number" step="0.01" min="0" id="acct-opening" value="${displayedOpening}"><span id="acct-opening-help" style="font-size:10.5px;color:var(--ink-faint);"></span></div>
     <div class="field"><label>Balance date (optional)</label><input type="date" id="acct-opening-date" value="${record?record.openingBalanceDate||'':''}"></div>
     <div class="field span2" id="acct-limit-wrap"><label>Credit limit (£)</label><input type="number" min="0" step="0.01" id="acct-limit" value="${record&&record.creditLimit?record.creditLimit:''}"></div>
+    <div class="field span2" id="acct-cycle-wrap"><div class="form-grid"><div class="field"><label>Statement day</label><input type="number" min="1" max="28" id="acct-statement-day" value="${record&&record.statementDay||''}" placeholder="e.g. 15"></div><div class="field"><label>Payment due day</label><input type="number" min="1" max="28" id="acct-due-day" value="${record&&record.dueDay||''}" placeholder="e.g. 10"></div><div class="field"><label>Minimum payment (£)</label><input type="number" min="0" step="0.01" id="acct-minimum-payment" value="${record&&record.minimumPayment!=null?record.minimumPayment:''}"></div><div class="field"><label class="regular-toggle" style="font-size:12px;margin-top:25px;"><input type="checkbox" id="acct-autopay-full" ${record&&record.autopayFullBalance?'checked':''}> Direct debit pays full balance</label></div></div></div>
     <div class="field span2"><label class="regular-toggle" style="font-size:12.5px;"><input type="checkbox" id="acct-networth" ${!record||record.includeInNetWorth!==false?'checked':''}> Include this account in net worth</label></div>
   </div></div><div class="modal-foot"><button class="btn" id="m-cancel">Cancel</button><button class="btn btn-primary" id="m-save">${record?'Save changes':'Add account'}</button></div>`);
   const typeEl=document.getElementById('acct-type');
@@ -52,6 +53,7 @@ function openAccountModal(id,preferredType){
     document.getElementById('acct-opening-label').textContent=liability?'Opening amount owed (£)':'Opening balance (£)';
     document.getElementById('acct-opening-help').textContent=liability?'Enter the positive amount owed; Pocket Ledger stores it as a liability.':['investment','pension'].includes(typeEl.value)?'For a clean cutover, enter the total value shown by your provider today. Later valuations supersede it.':'Enter the account value at the start of your transaction history.';
     document.getElementById('acct-limit-wrap').style.display=typeEl.value==='credit_card'?'':'none';
+    document.getElementById('acct-cycle-wrap').style.display=typeEl.value==='credit_card'?'':'none';
   }
   typeEl.onchange=updateTypeFields;updateTypeFields();
   document.getElementById('m-cancel').onclick=closeModal;
@@ -59,13 +61,15 @@ function openAccountModal(id,preferredType){
     const name=document.getElementById('acct-name').value.trim(),type=typeEl.value,institution=document.getElementById('acct-institution').value.trim();
     const rawOpening=Number(document.getElementById('acct-opening').value||0),openingBalance=isLiabilityType(type)?-Math.abs(rawOpening):rawOpening;
     const openingBalanceDate=document.getElementById('acct-opening-date').value,limitRaw=Number(document.getElementById('acct-limit').value),creditLimit=type==='credit_card'&&Number.isFinite(limitRaw)&&limitRaw>0?limitRaw:null;
+    const statementDayRaw=Number(document.getElementById('acct-statement-day').value),dueDayRaw=Number(document.getElementById('acct-due-day').value),minimumRaw=Number(document.getElementById('acct-minimum-payment').value);
+    const statementDay=type==='credit_card'&&statementDayRaw>=1&&statementDayRaw<=28?Math.round(statementDayRaw):null,dueDay=type==='credit_card'&&dueDayRaw>=1&&dueDayRaw<=28?Math.round(dueDayRaw):null,minimumPayment=type==='credit_card'&&Number.isFinite(minimumRaw)&&minimumRaw>=0?Money.round(minimumRaw):null,autopayFullBalance=type==='credit_card'&&document.getElementById('acct-autopay-full').checked;
     if(!name){toast('Enter an account name','error');return;}
     if((DB.accountRecords||[]).some(r=>r.id!==(record&&record.id)&&r.name.toLowerCase()===name.toLowerCase())){toast('That account name already exists','error');return;}
     if(!Number.isFinite(rawOpening)||rawOpening<0){toast('Enter a valid opening amount','error');return;}
     if(record&&['investment','pension'].includes(record.type)&&!['investment','pension'].includes(type)&&(DB.investmentValuations||[]).some(v=>v.accountId===record.id)){toast('Delete this account’s valuations before changing it to a non-investment type','error');return;}
     if(record){
       const oldName=record.name;
-      Object.assign(record,{name,type,institution,openingBalance,openingBalanceDate,creditLimit,includeInNetWorth:document.getElementById('acct-networth').checked});
+      Object.assign(record,{name,type,institution,openingBalance,openingBalanceDate,creditLimit,statementDay,dueDay,minimumPayment,autopayFullBalance,includeInNetWorth:document.getElementById('acct-networth').checked});
       if(oldName!==name){
         DB.transactions.forEach(t=>{if(t.account===oldName)t.account=name;});
         (DB.recurringItems||[]).forEach(item=>{if(item.account===oldName)item.account=name;});
@@ -74,7 +78,7 @@ function openAccountModal(id,preferredType){
         if(DB.reconciliations[oldName]){DB.reconciliations[name]=DB.reconciliations[oldName];delete DB.reconciliations[oldName];}
         if(UI.reconcileAccount===oldName)UI.reconcileAccount=name;
       }
-    }else DB.accountRecords.push(makeAccountRecord(name,type,openingBalance,{institution,openingBalanceDate,creditLimit,includeInNetWorth:document.getElementById('acct-networth').checked}));
+    }else DB.accountRecords.push(makeAccountRecord(name,type,openingBalance,{institution,openingBalanceDate,creditLimit,statementDay,dueDay,minimumPayment,autopayFullBalance,includeInNetWorth:document.getElementById('acct-networth').checked}));
     syncLegacyAccounts();scheduleSave();closeModal();renderContent();toast(record?'Account updated':'Account added');
   };
 }
@@ -160,6 +164,12 @@ function openSettingsModal(){
         </div>
         <p style="font-size:11px;color:var(--ink-faint);margin:6px 2px 0;">"Auto" follows your device's system setting.</p>
       </div>
+      <div style="border-top:1px solid var(--line);padding-top:14px;margin-bottom:14px;">
+        <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Desktop layout</div>
+        <div class="field"><label>Table density</label><select id="desktop-density"><option value="comfortable" ${DB.appPreferences.density==='comfortable'?'selected':''}>Comfortable</option><option value="compact" ${DB.appPreferences.density==='compact'?'selected':''}>Compact</option></select></div>
+        <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:9px;"><label class="regular-toggle"><input id="desktop-col-account" type="checkbox" ${DB.appPreferences.transactionColumns.account?'checked':''}> Show account column</label><label class="regular-toggle"><input id="desktop-col-status" type="checkbox" ${DB.appPreferences.transactionColumns.status?'checked':''}> Show status column</label></div>
+        <button class="btn btn-sm" id="desktop-shortcuts" style="margin-top:10px;">Keyboard shortcuts</button>
+      </div>
       <div style="border-top:1px solid var(--line); padding-top:14px; margin-bottom:14px;">
         <div style="font-size:11.5px;font-weight:600;color:var(--ink-soft);margin-bottom:8px;">Accounts</div>
         <div style="font-size:11.5px;color:var(--ink-faint);margin-bottom:10px;">Account types determine whether a balance is treated as an asset or liability. Archiving hides an account from new entries without deleting its history.</div>
@@ -174,6 +184,7 @@ function openSettingsModal(){
         <div style="font-size:11.5px;color:var(--ink-faint);">App version ${APP_VERSION} · ${DB.lastBackupAt ? `Last backup ${timeAgoLabel(DB.lastBackupAt)}` : 'No backup recorded yet'} · ${storageInfo.label}</div>
         <div style="font-size:11px;color:var(--ink-faint);">${storageInfo.detail}</div>
         <button class="btn" id="s-export">Export backup now</button>
+        <button class="btn" id="s-export-csv">Export transactions CSV</button>
         <button class="btn" id="s-restore">Restore from backup…</button>
         <input type="file" id="s-restore-file" accept=".json,application/json" class="hidden">
         ${storageInfo.canRecoverLegacy?'<button class="btn" id="s-recover-legacy">Recover the pre-IndexedDB copy</button>':''}
@@ -195,6 +206,10 @@ function openSettingsModal(){
     renderContent();
   });
   document.getElementById('add-account-btn').onclick = ()=>openAccountModal(null);
+  document.getElementById('desktop-density').onchange=event=>{DB.appPreferences.density=event.target.value;applyDesktopPreferences();scheduleSave();};
+  document.getElementById('desktop-col-account').onchange=event=>{DB.appPreferences.transactionColumns.account=event.target.checked;scheduleSave();};
+  document.getElementById('desktop-col-status').onchange=event=>{DB.appPreferences.transactionColumns.status=event.target.checked;scheduleSave();};
+  document.getElementById('desktop-shortcuts').onclick=()=>{closeModal();openCommandPalette();};
   document.getElementById('account-guide-btn').onclick = openAccountSetupGuide;
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('s-load-sample').onclick = ()=>{
@@ -202,6 +217,7 @@ function openSettingsModal(){
   };
   document.getElementById('s-restore').onclick = ()=> document.getElementById('s-restore-file').click();
   document.getElementById('s-export').onclick = exportBackup;
+  document.getElementById('s-export-csv').onclick = exportTransactionsCSV;
   const undoRestore = document.getElementById('s-undo-restore');
   if(undoRestore) undoRestore.onclick = recoverPreRestoreSnapshot;
   const recoverLegacy=document.getElementById('s-recover-legacy');
@@ -284,17 +300,31 @@ function handleRestoreFile(file){
     let parsed;
     try{ parsed = JSON.parse(e.target.result); }
     catch(err){ toast('That file isn\u2019t valid JSON — is it a Pocket Ledger backup?', 'error'); return; }
+    const verification=PocketLedgerBackup.verify(parsed);
+    if(!verification.ok){ toast(`Backup validation failed: ${verification.message}`, 'error'); return; }
     let clean;
     try{ clean=normaliseDB(parsed); }
     catch(err){ toast(`Backup validation failed: ${err.message}`, 'error'); return; }
     const currentCount = DB.transactions.length;
     const ruleAudit=PocketLedgerRules.auditRules(clean.rules,clean.categories);
+    const comparison=PocketLedgerBackup.diff(DB,clean),txDelta=comparison.counts.transactions.delta;
+    const manifest=parsed.backupManifest;
+    const newerSchema=Number(parsed.schemaVersion||manifest?.schemaVersion||0)>SCHEMA_VERSION;
+    const integrityColour=verification.status==='verified'?'var(--income)':'var(--gold)';
+    const range=comparison.after.firstTransactionDate?`${comparison.after.firstTransactionDate} to ${comparison.after.lastTransactionDate}`:'no dated transactions';
     openModal(`
       <div class="modal-head"><h3>Restore this backup?</h3></div>
       <div class="modal-body">
         <p style="margin:0 0 8px;color:var(--ink-soft);font-size:13px;">
           This file contains <strong>${clean.transactions.length}</strong> transaction${clean.transactions.length===1?'':'s'}, ${clean.categories.length} categories and <strong>${ruleAudit.count} auto-tagging rules</strong>. ${ruleAudit.directional.length?`${ruleAudit.directional.length} direction-specific rule${ruleAudit.directional.length===1?' is':'s are'} preserved.`:''}
         </p>
+        <div style="border:1px solid var(--line);background:var(--surface-2);border-radius:8px;padding:10px 12px;margin:0 0 10px;font-size:12px;line-height:1.65;">
+          <div style="font-weight:700;color:${integrityColour};">${verification.status==='verified'?iconCheck():iconWarnTriangle()} ${escHTML(verification.message)}</div>
+          <div>Transactions: ${currentCount} → <strong>${clean.transactions.length}</strong> (${txDelta>=0?'+':''}${txDelta}) · ${comparison.addedTransactions} new IDs · ${comparison.removedTransactions} removed IDs</div>
+          <div>Accounts: ${comparison.counts.accounts.before} → ${comparison.counts.accounts.after} · Rules: ${comparison.counts.rules.before} → ${comparison.counts.rules.after}</div>
+          <div>Date coverage: ${escHTML(range)}${manifest?.createdAt?` · Created ${timeAgoLabel(manifest.createdAt)}`:''}</div>
+        </div>
+        ${newerSchema?`<p style="margin:8px 0;color:var(--expense);font-size:12px;font-weight:700;">This backup was created by newer schema ${Number(parsed.schemaVersion||manifest?.schemaVersion)}. Unknown future fields may not survive this restore.</p>`:''}
         ${ruleAudit.invalid.length||ruleAudit.missingCategories.length||ruleAudit.conflicts.length?`<p style="margin:8px 0 0;color:var(--expense);font-size:12px;">Rule integrity warning: ${ruleAudit.invalid.length} invalid, ${ruleAudit.missingCategories.length} missing a category and ${ruleAudit.conflicts.length} conflicting duplicate${ruleAudit.conflicts.length===1?'':'s'}.</p>`:''}
         <p style="margin:0;color:var(--ink-soft);font-size:13px;">
           ${currentCount ? `Your current ${currentCount} transaction${currentCount===1?'':'s'} on this device will be <strong>replaced</strong> — export a backup first if you want to keep them.` : 'This device currently has no data, so nothing will be lost.'}
@@ -313,18 +343,21 @@ function handleRestoreFile(file){
   reader.onerror = ()=> toast('Could not read that file', 'error');
   reader.readAsText(file);
 }
+function downloadTextFile(contents,type,fileName){
+  const blob=new Blob([contents],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');
+  a.href=url;a.download=fileName;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+}
 function exportBackup(){
   syncLegacyAccounts();
   DB.lastBackupAt = new Date().toISOString();
   DB.appVersion = APP_VERSION;
   DB.schemaVersion = SCHEMA_VERSION;
   scheduleSave();
-  const blob = new Blob([JSON.stringify(DB, null, 2)], {type:'application/json'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = `pocket-ledger-backup-${todayISO()}.json`;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
-  toast('Backup downloaded');
+  const payload=PocketLedgerBackup.create(DB,{appVersion:APP_VERSION,schemaVersion:SCHEMA_VERSION,createdAt:DB.lastBackupAt});
+  downloadTextFile(JSON.stringify(payload,null,2),'application/json',`pocket-ledger-backup-${todayISO()}.json`);
+  toast('Verified backup downloaded');
 }
-
+function exportTransactionsCSV(){
+  downloadTextFile('\uFEFF'+PocketLedgerBackup.transactionsCSV(DB),'text/csv;charset=utf-8',`pocket-ledger-transactions-${todayISO()}.csv`);
+  toast(`Exported ${DB.transactions.length} transactions`);
+}

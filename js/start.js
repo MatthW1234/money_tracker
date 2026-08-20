@@ -4,7 +4,7 @@ const {
   spendMomentum,spendByDayOfWeek,savingsRateTrend,netWorthSummary,
 }=PocketLedgerReports.create({
   getDB:()=>DB,todayISO,localISODate,addDays,daysBetween,txInRange,trendBuckets,
-  expandSplits,countsTowardTotals,sumIncome,sumExpense,accountBalanceByName,accountTypeConfig,
+  expandSplits,countsTowardTotals,expenseEffect,sumIncome,sumExpense,accountBalanceByName,accountTypeConfig,
 });
 const NetWorthView=PocketLedgerNetWorthView.create({
   getDB:()=>DB,getUI:()=>UI,netWorthSummary,isLiabilityType,accountTypeConfig,gbp,escHTML,
@@ -34,6 +34,16 @@ function startApp(){
     renderContent();
   };
   updateThemeToggleIcon();
+  document.addEventListener?.('keydown',event=>{
+    if(event.defaultPrevented||event.ctrlKey||event.metaKey||event.altKey)return;
+    const target=event.target,editing=target&&(/INPUT|TEXTAREA|SELECT/.test(target.tagName)||target.isContentEditable);if(editing)return;
+    if(event.key==='?'){event.preventDefault();openCommandPalette();}
+    else if(event.key==='n'){event.preventDefault();openTxModal(null);}
+    else if(event.key==='i'){event.preventDefault();setTab('import');}
+    else if(event.key==='r'){event.preventDefault();setTab('reconcile');}
+    else if(event.key==='v'){event.preventDefault();setTab('review');}
+    else if(event.key==='/'){event.preventDefault();setTab('transactions');setTimeout(()=>document.getElementById('f-search')?.focus(),0);}
+  });
 
   setTab('dashboard');
 
@@ -67,6 +77,16 @@ async function init(){
   if(!DB.pendingCards) DB.pendingCards = [];
   if(!DB.netWorthSnapshots) DB.netWorthSnapshots = [];
   if(!DB.investmentValuations) DB.investmentValuations = [];
+  if(!DB.investmentActivities) DB.investmentActivities = [];
+  if(!DB.investmentImportSessions) DB.investmentImportSessions = [];
+  if(!DB.transactionLinks) DB.transactionLinks = [];
+  if(!DB.savedViews) DB.savedViews = [];
+  if(!DB.accountCloses) DB.accountCloses = [];
+  if(!DB.accountCloseAudit) DB.accountCloseAudit = [];
+  if(!DB.recurringMatches) DB.recurringMatches = [];
+  if(!DB.appPreferences) DB.appPreferences=PocketLedgerPreferences.normalise();
+  if(!DB.dismissedAlerts) DB.dismissedAlerts=[];
+  applyDesktopPreferences();
   if(DB.lastImport === undefined) DB.lastImport = null;
   if(!DB.importSessions) DB.importSessions = [];
   if(!DB.importProfiles) DB.importProfiles = [];

@@ -2,8 +2,8 @@
    POCKET LEDGER — application shell and UI logic
    ========================================================= */
 
-const APP_VERSION = '1.25';
-const SCHEMA_VERSION = 14;
+const APP_VERSION = '1.34';
+const SCHEMA_VERSION = 21;
 const STORAGE_KEY = 'pocketledger:data:v1';
 const PRE_RESTORE_KEY = 'pocketledger_pre_restore_v1';
 const {gbp,ukDate,ukDateShort,timeAgoLabel,monthLabel,escHTML,escAttr,statusLabel,statusPillHTML}=PocketLedgerUI.create();
@@ -83,7 +83,7 @@ function nextMonthDate(day){
 
 const {
   isPlainObject,validISODate,finiteNumber,accountTypeConfig,isLiabilityType,inferAccountType,makeAccountRecord,
-  transactionStatus,countsTowardTotals,categoryRowsFor,expandSplits,sumIncome,sumExpense,accountRecordFor,
+  transactionStatus,countsTowardTotals,expenseEffect,categoryRowsFor,expandSplits,sumIncome,sumExpense,accountRecordFor,
   transactionAccountRecord,transactionBelongsToAccount,
   allAccountNames,activeAccountNames,isLegacyImportedAccount,preferredImportAccountName,syncLegacyAccounts,
   ensureAccountRecord,accountOpeningBalance,accountTransactionsTo,clearedAccountBalance,reconciliationHistory,currentBalance,
@@ -169,6 +169,15 @@ function buildSeedDB(){
     importProfiles: [],
     netWorthSnapshots: [],
     investmentValuations: [],
+    investmentActivities: [],
+    investmentImportSessions: [],
+    transactionLinks: [],
+    savedViews: [],
+    accountCloses: [],
+    accountCloseAudit: [],
+    recurringMatches: [],
+    appPreferences: PocketLedgerPreferences.normalise(),
+    dismissedAlerts: [],
   };
 }
 function mulberry32(a){ return function(){ let t=a+=0x6D2B79F5; t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61); return ((t^t>>>14)>>>0)/4294967296; }; }
@@ -201,6 +210,15 @@ function buildEmptyDB(){
     importProfiles: [],
     netWorthSnapshots: [],
     investmentValuations: [],
+    investmentActivities: [],
+    investmentImportSessions: [],
+    transactionLinks: [],
+    savedViews: [],
+    accountCloses: [],
+    accountCloseAudit: [],
+    recurringMatches: [],
+    appPreferences: PocketLedgerPreferences.normalise(),
+    dismissedAlerts: [],
   };
 }
 
@@ -454,7 +472,7 @@ const UI = {
   showForecast: false,
   txSort: {col:'date', dir:'desc'},
   txSelected: new Set(),
-  txFilters: {search:'', category:'all', type:'all', status:'all', from:'', to:''},
+  txFilters: {search:'', category:'all', type:'all', status:'all', from:'', to:'', preset:''},
   charts: {},
   importState: null,
   investPeriod: 'month',
@@ -467,6 +485,7 @@ const UI = {
   reconcileImportSessionId: '',
   reconcileWarningsAcknowledged: false,
   lastUndo: null,
+  selectedSavedViewId: '',
 };
 // Generic one-shot undo for bulk actions. Only the most recent bulk action
 // is remembered — a fresh one simply replaces it rather than building a full
@@ -491,12 +510,23 @@ function offerUndo(message){
     },
   });
 }
+function activeCloseForTransaction(transaction){const record=transactionAccountRecord(transaction);return record?PocketLedgerPeriodClose.activeFor(DB.accountCloses,record):null;}
+function closedPeriodBlocks(transaction){const close=activeCloseForTransaction(transaction);return close&&PocketLedgerPeriodClose.protects(transaction,close)?close:null;}
+function warnClosedPeriod(transaction){const close=closedPeriodBlocks(transaction);if(!close)return false;toast(`This entry is protected by the ${ukDate(close.closedThrough)} close. Reopen it from Reconcile first.`,'error',{duration:5200});return true;}
+function saveDesktopPreferences(){DB.appPreferences=PocketLedgerPreferences.normalise(Object.assign({},DB.appPreferences,{transactionSort:UI.txSort,transactionFilters:UI.txFilters}));scheduleSave();}
+function applyDesktopPreferences(){const preferences=PocketLedgerPreferences.normalise(DB.appPreferences);DB.appPreferences=preferences;UI.txSort=Object.assign({},preferences.transactionSort);UI.txFilters=Object.assign({},preferences.transactionFilters);document.body.classList.toggle('density-compact',preferences.density==='compact');}
+function openCommandPalette(){
+  const commands=[['Add transaction','n',()=>openTxModal(null)],['Search transactions','/',()=>{setTab('transactions');setTimeout(()=>document.getElementById('f-search')?.focus(),0);}],['Import statement','i',()=>setTab('import')],['Reconcile accounts','r',()=>setTab('reconcile')],['Review inbox','v',()=>setTab('review')]];
+  openModal(`<div class="modal-head"><h3>Keyboard commands</h3></div><div class="modal-body">${commands.map((command,index)=>`<button class="btn" style="display:flex;width:100%;justify-content:space-between;margin-bottom:7px;" data-command="${index}"><span>${command[0]}</span><kbd>${command[1]}</kbd></button>`).join('')}<p style="font-size:11px;color:var(--ink-faint);margin:10px 0 0;">Press ? anywhere outside a form to reopen this palette. Escape closes dialogs.</p></div><div class="modal-foot"><button class="btn btn-primary" id="m-close">Close</button></div>`);
+  document.querySelectorAll('[data-command]').forEach(button=>button.onclick=()=>{const action=commands[Number(button.dataset.command)][2];closeModal();action();});document.getElementById('m-close').onclick=closeModal;
+}
 
 const NAV_ICONS_TITLE = {
   dashboard: ['Dashboard','All figures update automatically from your transactions.'],
   transactions: ['Transactions','Every income and outgoing you\u2019ve logged or imported.'],
   reconcile: ['Reconcile accounts','Check your ledger against a bank statement and lock an agreed balance.'],
   health: ['Data Health','Read-only checks for account, transfer, reconciliation, rule and valuation problems.'],
+  review: ['Review inbox','Work through categorisation, duplicate, transfer and investment-funding exceptions.'],
   import: ['Import statement','Bring in a CSV from your bank and assign categories in bulk.'],
   categories: ['Categories','Manage the groups used across your dashboard and imports, and the auto-tagging rules.'],
   plan: ['Spending Plan','What you can actually afford, based on your balance and regular bills.'],
@@ -571,6 +601,7 @@ function renderContent(){
   else if(UI.tab==='transactions') renderTransactions(c);
   else if(UI.tab==='reconcile') renderReconcile(c);
   else if(UI.tab==='health') renderHealth(c);
+  else if(UI.tab==='review') renderReview(c);
   else if(UI.tab==='import') renderImport(c);
   else if(UI.tab==='categories') renderCategories(c);
   else if(UI.tab==='plan') renderPlan(c);

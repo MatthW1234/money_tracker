@@ -179,6 +179,7 @@ function renderRuleList(){
   </div>`;
   host.innerHTML = summary + DB.rules.map((r,i)=>{
     const reason = riskyRuleReason(r.keyword);
+    const impact = PocketLedgerRules.ruleImpact(DB.rules,DB.transactions,i);
     const dirBadge = r.direction==='out' ? `<span class="stamp-mini" style="color:var(--expense);background:var(--expense-wash);">money out only</span>`
       : r.direction==='in' ? `<span class="stamp-mini" style="color:var(--income);background:var(--income-wash);">money in only</span>` : '';
     return `
@@ -189,12 +190,22 @@ function renderRuleList(){
       ${reason ? `<span class="rule-risk-flag" style="color:var(--gold);cursor:help;" title="${escAttr(reason)}">${iconWarnTriangle()}</span>` : ''}
       <span class="arrow">→</span>
       <span class="rc"><strong>${escHTML(r.category)}</strong></span>
+      <span style="font-size:10.5px;color:var(--ink-faint);white-space:nowrap;" title="${impact.shadowed?`${impact.shadowed} matching transaction${impact.shadowed===1?' is':'s are'} won by a more specific or higher-priority rule.`:'This rule wins every transaction it matches.'}">${impact.wins}/${impact.matches} active</span>
+      <button class="row-icon-btn" data-action="move-rule-up" data-i="${i}" title="Raise priority" ${i===0?'disabled':''}>↑</button>
+      <button class="row-icon-btn" data-action="move-rule-down" data-i="${i}" title="Lower priority" ${i===DB.rules.length-1?'disabled':''}>↓</button>
       <button class="row-icon-btn" data-action="edit-rule" data-i="${i}" title="Edit">${iconEdit()}</button>
       <button class="row-icon-btn" data-action="del-rule" data-i="${i}" title="Delete">${iconTrash()}</button>
     </div>
   `;
   }).join('');
   host.querySelectorAll('[data-action="edit-rule"]').forEach(b=> b.onclick = ()=> openRuleModal(parseInt(b.dataset.i)));
+  host.querySelectorAll('[data-action="move-rule-up"],[data-action="move-rule-down"]').forEach(b=> b.onclick = ()=>{
+    const from=parseInt(b.dataset.i);
+    const to=from+(b.dataset.action==='move-rule-up'?-1:1);
+    if(to<0||to>=DB.rules.length)return;
+    [DB.rules[from],DB.rules[to]]=[DB.rules[to],DB.rules[from]];
+    scheduleSave();renderRuleList();toast('Rule priority updated');
+  });
   host.querySelectorAll('[data-action="del-rule"]').forEach(b=> b.onclick = ()=>{
     DB.rules.splice(parseInt(b.dataset.i),1); scheduleSave(); renderRuleList(); toast('Rule deleted');
   });
@@ -250,11 +261,8 @@ function openCategoryModal(){
     scheduleSave(); closeModal(); renderContent(); toast('Category added');
   };
 }
-function ruleMatchPreview(keyword, direction){
-  const matches=PocketLedgerRules.matchingTransactions(DB.transactions,keyword,direction);
-  const uncategorised = matches.filter(t=> !t.category && !(t.splits&&t.splits.length)).length;
-  const examples = matches.slice(0,3).map(t=>t.description);
-  return {total:matches.length, uncategorised, examples};
+function ruleMatchPreview(keyword, category, direction, index){
+  return PocketLedgerRules.simulateRule({keyword,category,direction},DB.transactions,DB.rules,index);
 }
 function openRuleModal(index){
   const isEdit = index!=null && index>=0;
@@ -290,19 +298,22 @@ function openRuleModal(index){
       preview.innerHTML = `<span style="color:var(--ink-faint);">Start typing to see how many transactions this would match.</span>`;
       return;
     }
-    const {total, uncategorised, examples} = ruleMatchPreview(kw, direction);
+    const category = document.getElementById('r-cat').value;
+    const {matches,wins,uncategorised,changes,conflicts,examples} = ruleMatchPreview(kw, category, direction, isEdit?index:null);
     const reason = riskyRuleReason(kw);
     preview.innerHTML = `
       <div style="display:flex;align-items:center;gap:6px;font-weight:600;color:${reason?'var(--gold)':'var(--ink)'};">
         ${reason ? iconWarnTriangle() : ''}
-        Matches ${total} transaction${total===1?'':'s'}${uncategorised ? ` (${uncategorised} uncategorised would be tagged right away)` : ''}
+        Matches ${matches} transaction${matches===1?'':'s'} · wins ${wins}${matches>wins?` · ${matches-wins} superseded by a more specific rule`:''}
       </div>
-      ${examples.length ? `<div style="margin-top:4px;color:var(--ink-faint);">e.g. ${examples.map(e=>escHTML(e)).join(' · ')}</div>` : ''}
+      <div style="margin-top:4px;color:var(--ink-faint);">${uncategorised} uncategorised · ${changes} category change${changes===1?'':'s'}${conflicts?` · <span style="color:var(--gold);">${conflicts} competing-category match${conflicts===1?'':'es'}</span>`:''}</div>
+      ${examples.length ? `<div style="margin-top:4px;color:var(--ink-faint);">e.g. ${examples.map(e=>escHTML(e.description)).join(' · ')}</div>` : ''}
       ${reason ? `<div style="margin-top:4px;color:var(--gold);">${escHTML(reason)}</div>` : ''}
     `;
   }
   document.getElementById('r-kw').addEventListener('input', updatePreview);
   document.getElementById('r-dir').addEventListener('change', updatePreview);
+  document.getElementById('r-cat').addEventListener('change', updatePreview);
   updatePreview();
   document.getElementById('m-cancel').onclick = closeModal;
   document.getElementById('m-save').onclick = ()=>{
@@ -323,4 +334,3 @@ function openRuleModal(index){
 function applyRuleToUncategorised(keyword, category, direction){
   return PocketLedgerRules.applyToUncategorised(DB.transactions,keyword,category,direction);
 }
-

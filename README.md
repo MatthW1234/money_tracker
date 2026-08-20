@@ -1,5 +1,115 @@
 # Pocket Ledger
 
+## Version 1.34
+
+The Review inbox now includes local, explainable anomaly alerts. It can surface
+unusually large merchant payments, overdue expected income, subscription price
+increases and materially changed card bills. Each comparison states the latest
+amount and historical median or the missed expected date.
+
+Alerts require sufficient history, never alter data and can be dismissed by
+stable alert key. Dismissals advance the schema to version 21 and remain in
+backups. No account data leaves the device.
+
+## Version 1.33
+
+Desktop preferences now retain transaction filters, sort order, table density,
+account/status column visibility and the last-used transaction account. Quick
+date buttons cover the current month, last completed statement and the UK tax
+year from 6 April to 5 April.
+
+Keyboard shortcuts open transaction search (/), add money (N), import (I),
+reconcile (R) and the command palette (?). Shortcuts are ignored while typing
+in a form. Preferences advance the schema to version 20 and travel with JSON
+backups.
+
+## Version 1.32
+
+Confirmed recurring schedules now search existing imported transactions within
+a ten-day window, ranking candidates by date, amount and description. The user
+selects the actual occurrence before the schedule advances. Late payments,
+material amount changes and multiple plausible matches are disclosed.
+
+Each confirmation retains the expected and actual dates and amounts. Manually
+created occurrences use the same match history. This advances the schema to
+version 19 without changing unlinked transactions.
+
+## Version 1.31
+
+Reconciliation now supports a soft period close for each account. Closing
+stores a field-level snapshot through the selected date and protects those
+transactions from category, split, transfer, return-link, bulk and deletion
+changes. Reopening requires a reason and remains in local audit history.
+
+The close panel reports additions, deletions and edited fields since the
+snapshot, including offsetting edits that leave the balance unchanged. This
+advances the schema to version 18.
+
+## Version 1.30
+
+The new Review inbox combines uncategorised spending, exact duplicate groups,
+incomplete transfers and unmatched Trading 212 funding into one post-import
+routine. Transaction filters can be saved and reused alongside built-in views
+for the current month, missing receipts and large card purchases. Existing bulk
+category, account and status actions retain their one-step Undo safeguard.
+
+Saved views advance the schema to version 17; existing transactions and rules
+are unchanged during migration.
+
+## Version 1.29
+
+JSON exports now include an integrity manifest with creation time, app/schema
+versions, ledger counts and a deterministic checksum. Restore validates that
+checksum before touching the ledger and previews transaction/account/rule
+deltas, transaction-ID additions/removals and date coverage. Older JSON files
+remain supported and are clearly labelled legacy/unverified.
+
+Settings also exports a human-readable transactions CSV, retains the existing
+pre-restore recovery snapshot, and Data Health warns when no backup is recorded
+or the last one is over 30 days old. The ledger schema remains 16; the manifest
+is portable backup metadata rather than a new stored-data dependency.
+
+## Version 1.28
+
+The auto-tagging screen is now a rule workshop. A draft rule is simulated
+against the ledger before it is saved, showing raw matches, matches it would
+actually win, category changes, uncategorised rows and competing categories.
+Each saved rule also shows its active reach.
+
+Matching remains backwards-compatible: the longest keyword wins, while visible
+list order decides equal-length ties. Up/down controls make that priority
+editable without rewriting any of the existing rules. The schema remains 16.
+
+## Version 1.27
+
+Refunds, reversals and chargebacks can now be linked to the original outgoing
+transaction. Linked returns inherit the original category when needed and
+reduce spending instead of inflating income, while the link remains removable
+and visible in transaction history and reconciliation snapshots.
+
+Credit-card accounts can also store statement day, payment due day, minimum
+payment and full-balance Direct Debit preference. The dashboard calculates the
+next statement and due dates locally. Data Health detects orphaned, misdirected
+or excessive return links. This advances the schema to version 16.
+
+## Version 1.26
+
+Trading 212 History CSV files can now be imported directly from Investments.
+The destination product must be selected explicitly, preserving the separation
+between Trading 212 Invest and the Stocks & Shares ISA. The import records
+trades, dividends, cash interest, fees and currency conversions as provider
+activity rather than ordinary household transactions.
+
+Deposit and withdrawal rows are matched to existing investment-side transfer
+legs using account, direction, amount and a five-day posting window. An
+unmatched row remains visible for review but does not create a duplicate ledger
+entry. Overlapping exports are deduplicated by provider ID or stable activity
+key, and each import retains its source fingerprint and raw rows.
+
+Valuation checkpoints remain the source of current portfolio value because a
+history export describes activity rather than the live market value of open
+holdings. This advances the schema to version 15.
+
 ## Version 1.25
 
 The reconciliation wizard can now use a retained import session as its

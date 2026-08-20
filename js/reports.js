@@ -4,19 +4,19 @@
   const DOW_LABELS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
   function create(deps){
-    const {getDB,todayISO,localISODate,addDays,daysBetween,txInRange,trendBuckets,expandSplits,countsTowardTotals,sumIncome,sumExpense,accountBalanceByName,accountTypeConfig}=deps;
+    const {getDB,todayISO,localISODate,addDays,daysBetween,txInRange,trendBuckets,expandSplits,countsTowardTotals,expenseEffect,sumIncome,sumExpense,accountBalanceByName,accountTypeConfig}=deps;
     const db=()=>getDB();
 
     function computeSavingsOpportunities(list,range){
       const periodStart=new Date(range.from+'T00:00:00'),expandedList=expandSplits(list),results=[];
       (db().discretionaryCategories||[]).forEach(category=>{
         if(!db().categories.some(item=>item.name===category))return;
-        const current=expandedList.filter(t=>t.category===category&&t.amount<0&&countsTowardTotals(t)).reduce((sum,t)=>sum+Math.abs(t.amount),0);
+        const current=expandedList.filter(t=>t.category===category).reduce((sum,t)=>sum+expenseEffect(t),0);
         const monthlyTotals=[];
         for(let index=1;index<=3;index++){
           const base=new Date(periodStart.getFullYear(),periodStart.getMonth()-index,1);
           const from=localISODate(base),to=localISODate(new Date(base.getFullYear(),base.getMonth()+1,0));
-          const spend=expandSplits(txInRange(from,to)).filter(t=>t.category===category&&t.amount<0&&countsTowardTotals(t)).reduce((sum,t)=>sum+Math.abs(t.amount),0);
+          const spend=expandSplits(txInRange(from,to)).filter(t=>t.category===category).reduce((sum,t)=>sum+expenseEffect(t),0);
           if(spend>0)monthlyTotals.push(spend);
         }
         if(!monthlyTotals.length)return;
@@ -79,8 +79,8 @@
     function spendByDayOfWeek(range){
       const totals=[0,0,0,0,0,0,0],counts=[0,0,0,0,0,0,0];
       db().transactions.forEach(t=>{
-        if(!countsTowardTotals(t)||t.amount>=0||t.date<range.from||t.date>range.to)return;
-        const day=new Date(t.date+'T00:00:00').getDay();totals[day]+=Math.abs(t.amount);counts[day]++;
+        const effect=expenseEffect(t);if(!effect||t.date<range.from||t.date>range.to)return;
+        const day=new Date(t.date+'T00:00:00').getDay();totals[day]+=effect;counts[day]++;
       });
       return DOW_LABELS.map((label,index)=>({label,total:totals[index],count:counts[index]}));
     }
